@@ -1,0 +1,35 @@
+{
+  "name": "@retailer/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "enqueue": "tsx src/enqueue.ts",
+    "lint": "echo \"(worker) no lint configured\"",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@clerk/backend": "^1.21.4",
+    "@retailer/analytics": "workspace:*",
+    "@retailer/core": "workspace:*",
+    "@retailer/crawler": "workspace:*",
+    "@retailer/db": "workspace:*",
+    "@retailer/jobs": "workspace:*",
+    "@retailer/pipeline": "workspace:*",
+    "@retailer/reports": "workspace:*",
+    "@retailer/schema": "workspace:*",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.49.0",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^19.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

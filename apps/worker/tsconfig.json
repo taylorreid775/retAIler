@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // The worker imports @retailer/reports (React Email .tsx) via source
+    // entrypoints, so its own tsc must understand JSX + DOM types.
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "react"]
+  },
+  "include": ["src/**/*.ts"]
+}

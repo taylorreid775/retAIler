@@ -1,0 +1,413 @@
+import { sql } from 'drizzle-orm';
+import {
+  boolean,
+  customType,
+  index,
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  primaryKey,
+  real,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from 'drizzle-orm/pg-core';
+
+/**
+ * pgvector column type. Dimension matches the embedding model
+ * (text-embedding-3-small = 1536).
+ */
+export const EMBEDDING_DIM = 1536;
+const vector = customType<{ data: number[]; driverData: string }>({
+  dataType() {
+    return `vector(${EMBEDDING_DIM})`;
+  },
+  toDriver(value: number[]): string {
+    return `[${value.join(',')}]`;
+  },
+  fromDriver(value: string): number[] {
+    return value.replace(/[[\]]/g, '').split(',').map(Number);
+  },
+});
+
+// ─── Enums ──────────────────────────────────────────────────────────────
+export const fetchStrategyEnum = pgEnum('fetch_strategy', ['static', 'browser']);
+export const availabilityEnum = pgEnum('availability', [
+  'in_stock',
+  'out_of_stock',
+  'preorder',
+  'discontinued',
+  'unknown',
+]);
+export const currencyEnum = pgEnum('currency', ['CAD', 'USD']);
+export const signalTypeEnum = pgEnum('signal_type', [
+  'price_drop',
+  'price_increase',
+  'new_product',
+  'back_in_stock',
+  'low_stock',
+  'out_of_stock',
+  'assortment_expansion',
+  'seo_keyword_gap',
+]);
+export const signalSeverityEnum = pgEnum('signal_severity', ['info', 'notable', 'critical']);
+export const planEnum = pgEnum('plan', ['trial', 'starter', 'growth', 'scale']);
+export const crawlRunStatusEnum = pgEnum('crawl_run_status', [
+  'queued',
+  'running',
+  'completed',
+  'failed',
+]);
+export const matchStatusEnum = pgEnum('match_status', [
+  'unmatched',
+  'auto_matched',
+  'needs_review',
+  'confirmed',
+  'rejected',
+]);
+
+// ─── Retailers & crawl config ───────────────────────────────────────────
+export const retailers = pgTable(
+  'retailers',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    key: varchar('key', { length: 64 }).notNull(),
+    name: text('name').notNull(),
+    domain: text('domain').notNull(),
+    country: varchar('country', { length: 2 }).notNull().default('CA'),
+    affiliateTag: text('affiliate_tag'),
+    enabled: boolean('enabled').notNull().default(true),
+    requestDelayMs: integer('request_delay_ms').notNull().default(2000),
+    maxConcurrency: integer('max_concurrency').notNull().default(2),
+    respectRobotsTxt: boolean('respect_robots_txt').notNull().default(true),
+    fetchStrategy: fetchStrategyEnum('fetch_strategy').notNull().default('static'),
+    useProxy: boolean('use_proxy').notNull().default(false),
+    crawlSchedule: text('crawl_schedule').notNull().default('0 6 * * *'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    keyIdx: uniqueIndex('retailers_key_idx').on(t.key),
+  }),
+);
+
+export const crawlRuns = pgTable('crawl_runs', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  retailerId: uuid('retailer_id')
+    .notNull()
+    .references(() => retailers.id, { onDelete: 'cascade' }),
+  status: crawlRunStatusEnum('status').notNull().default('queued'),
+  urlsDiscovered: integer('urls_discovered').notNull().default(0),
+  urlsFetched: integer('urls_fetched').notNull().default(0),
+  productsExtracted: integer('products_extracted').notNull().default(0),
+  errorCount: integer('error_count').notNull().default(0),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp('finished_at', { withTimezone: true }),
+});
+
+// ─── Taxonomy ───────────────────────────────────────────────────────────
+export const brands = pgTable(
+  'brands',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    name: text('name').notNull(),
+    slug: text('slug').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ slugIdx: uniqueIndex('brands_slug_idx').on(t.slug) }),
+);
+
+export const brandAliases = pgTable(
+  'brand_aliases',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    brandId: uuid('brand_id')
+      .notNull()
+      .references(() => brands.id, { onDelete: 'cascade' }),
+    alias: text('alias').notNull(),
+  },
+  (t) => ({ aliasIdx: uniqueIndex('brand_aliases_alias_idx').on(t.alias) }),
+);
+
+export const categories = pgTable(
+  'categories',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    name: text('name').notNull(),
+    slug: text('slug').notNull(),
+    parentId: uuid('parent_id'),
+    path: text('path').notNull(),
+    depth: integer('depth').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pathIdx: uniqueIndex('categories_path_idx').on(t.path),
+  }),
+);
+
+export const retailerCategories = pgTable(
+  'retailer_categories',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    rawPath: text('raw_path').notNull(),
+    categoryId: uuid('category_id').references(() => categories.id),
+  },
+  (t) => ({
+    rcIdx: uniqueIndex('retailer_categories_idx').on(t.retailerId, t.rawPath),
+  }),
+);
+
+// ─── Products ───────────────────────────────────────────────────────────
+export const products = pgTable(
+  'products',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    canonicalTitle: text('canonical_title').notNull(),
+    brandId: uuid('brand_id').references(() => brands.id),
+    categoryId: uuid('category_id').references(() => categories.id),
+    gtin: text('gtin'),
+    mpn: text('mpn'),
+    imageUrl: text('image_url'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    gtinIdx: index('products_gtin_idx').on(t.gtin),
+    brandIdx: index('products_brand_idx').on(t.brandId),
+  }),
+);
+
+export const retailerProducts = pgTable(
+  'retailer_products',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    productId: uuid('product_id').references(() => products.id),
+    url: text('url').notNull(),
+    retailerSku: text('retailer_sku'),
+    rawTitle: text('raw_title').notNull(),
+    brandRaw: text('brand_raw'),
+    categoryPathRaw: jsonb('category_path_raw').$type<string[]>().notNull().default([]),
+    gtin: text('gtin'),
+    mpn: text('mpn'),
+    imageUrl: text('image_url'),
+    attributes: jsonb('attributes').$type<Record<string, string>>().notNull().default({}),
+    matchStatus: matchStatusEnum('match_status').notNull().default('unmatched'),
+    matchConfidence: real('match_confidence'),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    active: boolean('active').notNull().default(true),
+  },
+  (t) => ({
+    urlIdx: uniqueIndex('retailer_products_url_idx').on(t.url),
+    retailerIdx: index('retailer_products_retailer_idx').on(t.retailerId),
+    productIdx: index('retailer_products_product_idx').on(t.productId),
+    matchStatusIdx: index('retailer_products_match_status_idx').on(t.matchStatus),
+  }),
+);
+
+export const productEmbeddings = pgTable('product_embeddings', {
+  retailerProductId: uuid('retailer_product_id')
+    .primaryKey()
+    .references(() => retailerProducts.id, { onDelete: 'cascade' }),
+  embedding: vector('embedding').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ─── Time series: price & stock ─────────────────────────────────────────
+export const priceObservations = pgTable(
+  'price_observations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerProductId: uuid('retailer_product_id')
+      .notNull()
+      .references(() => retailerProducts.id, { onDelete: 'cascade' }),
+    amountMinor: integer('amount_minor').notNull(),
+    listAmountMinor: integer('list_amount_minor'),
+    currency: currencyEnum('currency').notNull().default('CAD'),
+    capturedAt: timestamp('captured_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    rpTimeIdx: index('price_obs_rp_time_idx').on(t.retailerProductId, t.capturedAt),
+  }),
+);
+
+export const stockObservations = pgTable(
+  'stock_observations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerProductId: uuid('retailer_product_id')
+      .notNull()
+      .references(() => retailerProducts.id, { onDelete: 'cascade' }),
+    availability: availabilityEnum('availability').notNull().default('unknown'),
+    qty: integer('qty'),
+    capturedAt: timestamp('captured_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    rpTimeIdx: index('stock_obs_rp_time_idx').on(t.retailerProductId, t.capturedAt),
+  }),
+);
+
+// ─── Raw page snapshots (provenance) ────────────────────────────────────
+export const pageSnapshots = pgTable(
+  'page_snapshots',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    url: text('url').notNull(),
+    /** Vercel Blob key. */
+    blobKey: text('blob_key').notNull(),
+    contentHash: varchar('content_hash', { length: 64 }).notNull(),
+    httpStatus: integer('http_status'),
+    capturedAt: timestamp('captured_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    urlTimeIdx: index('page_snapshots_url_time_idx').on(t.url, t.capturedAt),
+  }),
+);
+
+// ─── Signals (intelligence layer output) ────────────────────────────────
+export const signals = pgTable(
+  'signals',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    type: signalTypeEnum('type').notNull(),
+    severity: signalSeverityEnum('severity').notNull().default('info'),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    retailerProductId: uuid('retailer_product_id').references(() => retailerProducts.id, {
+      onDelete: 'cascade',
+    }),
+    productId: uuid('product_id').references(() => products.id),
+    title: text('title').notNull(),
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    typeTimeIdx: index('signals_type_time_idx').on(t.type, t.occurredAt),
+    retailerTimeIdx: index('signals_retailer_time_idx').on(t.retailerId, t.occurredAt),
+  }),
+);
+
+// ─── SEO ────────────────────────────────────────────────────────────────
+export const keywords = pgTable(
+  'keywords',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    term: text('term').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ termIdx: uniqueIndex('keywords_term_idx').on(t.term) }),
+);
+
+export const serpObservations = pgTable(
+  'serp_observations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    keywordId: uuid('keyword_id')
+      .notNull()
+      .references(() => keywords.id, { onDelete: 'cascade' }),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    rank: integer('rank').notNull(),
+    capturedAt: timestamp('captured_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    kwIdx: index('serp_obs_kw_idx').on(t.keywordId, t.capturedAt),
+  }),
+);
+
+// ─── Tenancy / billing ──────────────────────────────────────────────────
+export const orgs = pgTable(
+  'orgs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    clerkOrgId: text('clerk_org_id').notNull(),
+    name: text('name').notNull(),
+    plan: planEnum('plan').notNull().default('trial'),
+    /** The org's own storefront (for "you vs competitors" SEO gap analysis). */
+    ownRetailerId: uuid('own_retailer_id').references(() => retailers.id),
+    stripeCustomerId: text('stripe_customer_id'),
+    stripeSubscriptionId: text('stripe_subscription_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ clerkIdx: uniqueIndex('orgs_clerk_idx').on(t.clerkOrgId) }),
+);
+
+export const orgCompetitors = pgTable(
+  'org_competitors',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    uniq: uniqueIndex('org_competitors_uniq').on(t.orgId, t.retailerId),
+  }),
+);
+
+export const alertRules = pgTable('alert_rules', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  orgId: uuid('org_id')
+    .notNull()
+    .references(() => orgs.id, { onDelete: 'cascade' }),
+  signalTypes: jsonb('signal_types').$type<string[]>().notNull().default([]),
+  retailerIds: jsonb('retailer_ids').$type<string[]>().notNull().default([]),
+  minSeverity: signalSeverityEnum('min_severity').notNull().default('notable'),
+  channels: jsonb('channels').$type<string[]>().notNull().default(['in_app']),
+  enabled: boolean('enabled').notNull().default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const alertEvents = pgTable(
+  'alert_events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    alertRuleId: uuid('alert_rule_id').references(() => alertRules.id, { onDelete: 'set null' }),
+    signalId: uuid('signal_id')
+      .notNull()
+      .references(() => signals.id, { onDelete: 'cascade' }),
+    readAt: timestamp('read_at', { withTimezone: true }),
+    deliveredEmailAt: timestamp('delivered_email_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    orgTimeIdx: index('alert_events_org_time_idx').on(t.orgId, t.createdAt),
+  }),
+);
+
+// Human review queue for low-confidence product matches.
+export const matchReviewQueue = pgTable('match_review_queue', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  retailerProductId: uuid('retailer_product_id')
+    .notNull()
+    .references(() => retailerProducts.id, { onDelete: 'cascade' }),
+  candidateProductId: uuid('candidate_product_id').references(() => products.id),
+  confidence: real('confidence').notNull(),
+  reason: text('reason'),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const schemaSql = sql; // re-export for migration helpers
