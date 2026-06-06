@@ -71,9 +71,27 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       const staticFetcher = fetcherFor('static');
       const browserFetcher = fetcherFor('browser') as BrowserFetcher;
       const fetchText = async (url: string): Promise<string | null> => {
+        // Sitemaps / robots are XML or plain text — static HTTP only.
+        if (isSitemapLikeUrl(url)) {
+          try {
+            const staticRes = await staticFetcher.fetch(url);
+            return staticRes.status >= 200 && staticRes.status < 300 ? staticRes.html : null;
+          } catch {
+            return null;
+          }
+        }
+
+        // HTML pages (PDPs, homepage): bot walls often return HTTP 200 with a
+        // challenge page, so don't treat every 2xx static response as success.
         try {
           const staticRes = await staticFetcher.fetch(url);
-          if (staticRes.status >= 200 && staticRes.status < 300) return staticRes.html;
+          if (
+            staticRes.status >= 200 &&
+            staticRes.status < 300 &&
+            !looksLikeBotWall(staticRes.html, staticRes.finalUrl)
+          ) {
+            return staticRes.html;
+          }
         } catch (err) {
           log.warn('static fetch failed, trying browser', { url, err: String(err) });
         }
@@ -200,5 +218,22 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       });
     },
     { connection: redisConnection(), concurrency: 1 },
+  );
+}
+
+function isSitemapLikeUrl(url: string): boolean {
+  return /\.(xml|gz)(\?|$)|\/robots\.txt$/i.test(url);
+}
+
+/** Walmart-class sites return 200 with a challenge page instead of a 403. */
+function looksLikeBotWall(html: string, finalUrl?: string): boolean {
+  if (finalUrl && /\/blocked(\?|$)/i.test(finalUrl)) return true;
+  const head = html.slice(0, 4000).toLowerCase();
+  return (
+    head.includes('verify your identity') ||
+    head.includes('captcha') ||
+    head.includes('px-captcha') ||
+    head.includes('access denied') ||
+    head.includes('robot or human')
   );
 }

@@ -191,6 +191,25 @@ export async function discoverSite(
     }
   }
 
+  // Bot-walled retailers (e.g. Walmart) block static and headless-browser
+  // fetches with HTTP-200 challenge pages. When browser discovery was requested
+  // and content checks found nothing, accept strong URL-path evidence from
+  // product-named sitemaps (e.g. /en/ip/... from sitemap-product-*.xml).
+  if (confirmed.length === 0 && opts.fetchText) {
+    const evidence = confirmFromSitemapUrlEvidence(corpus, sampleLimit);
+    if (evidence.length >= 3) {
+      for (const url of evidence) {
+        confirmed.push(url);
+        const entry = corpus.find((e) => e.url === url);
+        if (entry?.sitemap) productSitemaps.add(entry.sitemap);
+      }
+      confirmedViaBrowserOnly = true;
+      notes.push(
+        `confirmed ${evidence.length} URL(s) via product-sitemap path pattern (content fetch blocked)`,
+      );
+    }
+  }
+
   const confidence = sample.length ? confirmed.length / sample.length : 0;
   const productUrlPattern = deriveProductPattern(confirmed);
 
@@ -531,6 +550,29 @@ async function urlExists(url: string, ua: string): Promise<boolean> {
  * `sitemap-product-1p-en.xml` before `sitemap-categories.xml`). Pure ordering
  * hint — non-product sitemaps are still sampled, just later.
  */
+/** Product-detail path tokens seen across major retailers. */
+const PRODUCT_PATH_RE = /\/(ip|products?|p|item|sku)\//i;
+
+/**
+ * When PDP HTML cannot be fetched (bot wall), accept URLs from product sitemaps
+ * whose paths match known product-detail patterns.
+ */
+function confirmFromSitemapUrlEvidence(
+  corpus: { url: string; sitemap: string }[],
+  limit: number,
+): string[] {
+  const urls = dedupe(
+    corpus
+      .filter(
+        (e) =>
+          PRODUCT_PATH_RE.test(e.url) && (!e.sitemap || /product/i.test(e.sitemap)),
+      )
+      .map((e) => e.url),
+  );
+  if (urls.length < 3) return [];
+  return spread(urls, Math.min(limit, 10));
+}
+
 function prioritizeProductSitemaps(candidates: string[]): string[] {
   const score = (url: string): number => {
     const u = url.toLowerCase();
