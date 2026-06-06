@@ -1,8 +1,8 @@
 import { db, schema, eq } from '@retailer/db';
 import { createLogger } from '@retailer/core';
-import { canonicalizeBrand, canonicalizeCategory } from './normalize.js';
-import { embeddingText, upsertEmbedding } from './embeddings.js';
-import { decideMatch, nearestCandidates } from './matching.js';
+import { canonicalizeBrand, canonicalizeCategory } from './normalize';
+import { embeddingText, upsertEmbedding } from './embeddings';
+import { decideMatch, nearestCandidates } from './matching';
 
 const log = createLogger('pipeline:match');
 

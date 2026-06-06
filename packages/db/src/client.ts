@@ -1,11 +1,11 @@
+import './load-env';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import * as schema from './schema.js';
+import * as schema from './schema';
 
 const connectionString = process.env.DATABASE_URL;
 
 if (!connectionString) {
-  // Fail loud at import time in worker/server contexts; Next handles its own env.
   // eslint-disable-next-line no-console
   console.warn('[db] DATABASE_URL is not set — db client will fail on first query.');
 }

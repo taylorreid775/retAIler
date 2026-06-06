@@ -1,5 +1,5 @@
-import { walkSitemap } from '../sitemap.js';
-import { type DiscoverContext, type RetailerAdapter } from './types.js';
+import { walkSitemap } from '../sitemap';
+import { type DiscoverContext, type RetailerAdapter } from './types';
 
 /**
  * MEC (www.mec.ca). Product URLs follow "/en/product/<id>/<slug>".
@@ -18,6 +18,7 @@ export const mecAdapter: RetailerAdapter = {
     for await (const url of walkSitemap(
       'https://www.mec.ca/sitemap.xml',
       (u) => this.isProductUrl(u),
+      { fetchText: ctx.fetchText },
     )) {
       if (ctx.categoryFilter && !ctx.categoryFilter.some((f) => url.toLowerCase().includes(f)))
         continue;

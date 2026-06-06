@@ -1,5 +1,5 @@
-import { walkSitemap } from '../sitemap.js';
-import { type DiscoverContext, type RetailerAdapter } from './types.js';
+import { walkSitemap } from '../sitemap';
+import { type DiscoverContext, type RetailerAdapter } from './types';
 
 /**
  * Sport Chek (www.sportchek.ca). JS-heavy storefront → browser fetch strategy
@@ -11,7 +11,7 @@ export const sportchekAdapter: RetailerAdapter = {
   domain: 'www.sportchek.ca',
 
   isProductUrl(url: string): boolean {
-    return /\/product\//i.test(url) && url.includes('sportchek.ca');
+    return /\/pdp\//i.test(url) && url.includes('sportchek.ca');
   },
 
   async *discoverProductUrls(ctx: DiscoverContext): AsyncGenerator<string> {
@@ -19,6 +19,7 @@ export const sportchekAdapter: RetailerAdapter = {
     for await (const url of walkSitemap(
       'https://www.sportchek.ca/sitemap.xml',
       (u) => this.isProductUrl(u),
+      { fetchText: ctx.fetchText },
     )) {
       if (ctx.categoryFilter && !matchesCategory(url, ctx.categoryFilter)) continue;
       yield url;

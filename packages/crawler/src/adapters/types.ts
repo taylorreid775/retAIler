@@ -5,6 +5,8 @@ export interface DiscoverContext {
   categoryFilter?: string[];
   /** Hard cap on number of URLs to yield (for sampling / dev). */
   limit?: number;
+  /** Override HTTP fetch (e.g. Playwright for Cloudflare-protected sitemaps). */
+  fetchText?: (url: string) => Promise<string | null>;
 }
 
 /**

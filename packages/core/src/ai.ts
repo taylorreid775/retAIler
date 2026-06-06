@@ -1,6 +1,6 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import type { EmbeddingModel, LanguageModel } from 'ai';
-import { serverEnv } from './env.js';
+import { serverEnv } from './env';
 
 type OpenAIProvider = ReturnType<typeof createOpenAI>;
 

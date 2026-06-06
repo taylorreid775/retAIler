@@ -4,7 +4,7 @@ import { db, schema, eq, sql } from '@retailer/db';
 import { recentSignals } from '@retailer/analytics';
 import { serverEnv, createLogger } from '@retailer/core';
 import { PLAN_LIMITS } from '@retailer/schema';
-import { WeeklyDigest } from './weekly-digest.js';
+import { WeeklyDigest } from './weekly-digest';
 
 const log = createLogger('reports:send');
 

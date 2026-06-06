@@ -1,5 +1,5 @@
-import { walkSitemap } from '../sitemap.js';
-import { type DiscoverContext, type RetailerAdapter } from './types.js';
+import { walkSitemap } from '../sitemap';
+import { type DiscoverContext, type RetailerAdapter } from './types';
 
 /**
  * Sporting Life (www.sportinglife.ca). Shopify-style storefront → product
@@ -19,6 +19,7 @@ export const sportingLifeAdapter: RetailerAdapter = {
     for await (const url of walkSitemap(
       'https://www.sportinglife.ca/sitemap.xml',
       (u) => this.isProductUrl(u),
+      { fetchText: ctx.fetchText },
     )) {
       if (ctx.categoryFilter && !ctx.categoryFilter.some((f) => url.toLowerCase().includes(f)))
         continue;

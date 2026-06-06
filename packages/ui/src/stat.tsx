@@ -1,6 +1,6 @@
 import * as React from 'react';
-import { cn } from './cn.js';
-import { Card, CardContent } from './card.js';
+import { cn } from './cn';
+import { Card, CardContent } from './card';
 
 export interface StatProps {
   label: string;

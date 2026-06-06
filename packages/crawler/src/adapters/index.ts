@@ -1,7 +1,7 @@
-import { type RetailerAdapter } from './types.js';
-import { sportchekAdapter } from './sportchek.js';
-import { mecAdapter } from './mec.js';
-import { sportingLifeAdapter } from './sportinglife.js';
+import { type RetailerAdapter } from './types';
+import { sportchekAdapter } from './sportchek';
+import { mecAdapter } from './mec';
+import { sportingLifeAdapter } from './sportinglife';
 
 const adapters: Record<string, RetailerAdapter> = {
   [sportchekAdapter.key]: sportchekAdapter,
@@ -22,5 +22,5 @@ export function listAdapters(): RetailerAdapter[] {
   return Object.values(adapters);
 }
 
-export * from './types.js';
-export * from './generic.js';
+export * from './types';
+export * from './generic';

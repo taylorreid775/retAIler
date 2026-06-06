@@ -1,8 +1,8 @@
 import { db, sql } from '@retailer/db';
 import { fromMinor, formatMoney } from '@retailer/schema';
-import { writeSignal } from './signals.js';
+import { writeSignal } from './signals';
 
-interface PriceChangeRow {
+interface PriceChangeRow extends Record<string, unknown> {
   retailer_product_id: string;
   retailer_id: string;
   product_id: string | null;

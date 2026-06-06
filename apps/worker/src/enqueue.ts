@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env.js';
 import { queues } from '@retailer/jobs';
 import { db, schema, eq } from '@retailer/db';
 import { createLogger } from '@retailer/core';

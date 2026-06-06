@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env.js';
 import { createLogger } from '@retailer/core';
 import { startDiscoverWorker } from './consumers/discover.js';
 import { startFetchWorker } from './consumers/fetch.js';

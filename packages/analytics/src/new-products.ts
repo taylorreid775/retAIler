@@ -1,7 +1,7 @@
 import { db, sql } from '@retailer/db';
-import { writeSignal } from './signals.js';
+import { writeSignal } from './signals';
 
-interface NewProductRow {
+interface NewProductRow extends Record<string, unknown> {
   id: string;
   retailer_id: string;
   product_id: string | null;
@@ -9,7 +9,7 @@ interface NewProductRow {
   first_seen_at: Date;
 }
 
-interface AssortmentRow {
+interface AssortmentRow extends Record<string, unknown> {
   retailer_id: string;
   category_path: string | null;
   cnt: number;

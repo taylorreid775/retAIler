@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AvailabilitySchema, CurrencySchema } from './common.js';
+import { AvailabilitySchema, CurrencySchema } from './common';
 
 /**
  * RawExtractedProduct is what a crawler/extractor produces from a single

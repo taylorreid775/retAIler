@@ -1,5 +1,5 @@
-import { walkSitemap } from '../sitemap.js';
-import { type DiscoverContext, type RetailerAdapter } from './types.js';
+import { walkSitemap } from '../sitemap';
+import { type DiscoverContext, type RetailerAdapter } from './types';
 
 export interface GenericAdapterConfig {
   key: string;

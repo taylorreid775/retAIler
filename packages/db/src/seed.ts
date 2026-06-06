@@ -1,6 +1,6 @@
-import 'dotenv/config';
-import { db, queryClient } from './client.js';
-import { retailers } from './schema.js';
+import './load-env.js';
+import { db, queryClient } from './client';
+import { retailers } from './schema';
 
 /**
  * Seed the three independent Canadian sporting-goods retailers.
@@ -26,7 +26,7 @@ const SEED_RETAILERS = [
     key: 'sportinglife',
     name: 'Sporting Life',
     domain: 'www.sportinglife.ca',
-    fetchStrategy: 'static' as const,
+    fetchStrategy: 'browser' as const,
     requestDelayMs: 2000,
   },
 ];

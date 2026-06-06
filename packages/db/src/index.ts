@@ -1,6 +1,6 @@
-export * from './client.js';
-export * as schema from './schema.js';
-export { EMBEDDING_DIM } from './schema.js';
+export * from './client';
+export * as schema from './schema';
+export { EMBEDDING_DIM } from './schema';
 // Curated re-export of the operators we actually use (avoids pulling the
 // entire drizzle-orm surface into every consumer).
 export {

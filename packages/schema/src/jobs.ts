@@ -2,12 +2,12 @@ import { z } from 'zod';
 
 /** Queue names used across the platform. */
 export const QueueName = {
-  Discover: 'crawl:discover',
-  Fetch: 'crawl:fetch',
-  Extract: 'pipeline:extract',
-  Match: 'pipeline:match',
-  Analytics: 'analytics:compute',
-  Reports: 'reports:send',
+  Discover: 'crawl-discover',
+  Fetch: 'crawl-fetch',
+  Extract: 'pipeline-extract',
+  Match: 'pipeline-match',
+  Analytics: 'analytics-compute',
+  Reports: 'reports-send',
 } as const;
 export type QueueName = (typeof QueueName)[keyof typeof QueueName];
 

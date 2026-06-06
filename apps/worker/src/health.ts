@@ -50,6 +50,17 @@ export function startHealthServer(port = Number(process.env.HEALTH_PORT ?? 8080)
     res.end();
   });
 
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      log.error('health port already in use', {
+        port,
+        hint: `kill the other worker (lsof -ti :${port} | xargs kill) or set HEALTH_PORT`,
+      });
+      process.exit(1);
+    }
+    throw err;
+  });
+
   server.listen(port, () => log.info('health server listening', { port }));
   return server;
 }

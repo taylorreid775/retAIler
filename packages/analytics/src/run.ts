@@ -1,7 +1,7 @@
 import { createLogger } from '@retailer/core';
-import { computePriceChanges } from './price-changes.js';
-import { computeNewProducts } from './new-products.js';
-import { computeInventorySignals } from './inventory.js';
+import { computePriceChanges } from './price-changes';
+import { computeNewProducts } from './new-products';
+import { computeInventorySignals } from './inventory';
 
 const log = createLogger('analytics:run');
 

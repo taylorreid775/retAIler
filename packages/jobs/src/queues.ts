@@ -8,7 +8,7 @@ import {
   type MatchJob,
   type ReportJob,
 } from '@retailer/schema';
-import { redisConnection } from './connection.js';
+import { redisConnection } from './connection';
 
 type JobMap = {
   [QueueName.Discover]: DiscoverJob;

@@ -72,9 +72,9 @@ export async function recentSignals(
   const typeClause =
     opts.types && opts.types.length
       ? sql`AND s.type = ANY(ARRAY[${sql.join(
-          opts.types.map((t) => sql`${t}`),
+          opts.types.map((t) => sql`${t}::signal_type`),
           sql`, `,
-        )}])`
+        )}]::signal_type[])`
       : sql``;
 
   const rows = await db.execute<{

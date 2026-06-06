@@ -1,7 +1,7 @@
 import { RawExtractedProductSchema, type RawExtractedProduct } from '@retailer/schema';
 import { createLogger } from '@retailer/core';
-import { extractFromJsonLd } from './structured.js';
-import { extractWithLlm } from './llm.js';
+import { extractFromJsonLd } from './structured';
+import { extractWithLlm } from './llm';
 
 const log = createLogger('crawler:extract');
 
@@ -70,5 +70,5 @@ function stripNulls(p: RawExtractedProduct): Partial<RawExtractedProduct> {
   return out as Partial<RawExtractedProduct>;
 }
 
-export { extractFromJsonLd } from './structured.js';
-export { extractWithLlm } from './llm.js';
+export { extractFromJsonLd } from './structured';
+export { extractWithLlm } from './llm';

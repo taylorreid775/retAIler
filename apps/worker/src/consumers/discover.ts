@@ -4,6 +4,7 @@ import { db, schema, eq } from '@retailer/db';
 import { getAdapter, isAllowed } from '@retailer/crawler';
 import { QueueName, type DiscoverJob } from '@retailer/schema';
 import { getRetailer } from '../retailers.js';
+import { fetcherFor } from '../fetchers.js';
 import { SCHEDULED_RUN_SENTINEL } from '../scheduler.js';
 
 const log = createLogger('worker:discover');
@@ -44,7 +45,24 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
       }
 
       let discovered = 0;
-      for await (const url of adapter.discoverProductUrls({ categoryFilter, limit })) {
+      const staticFetcher = fetcherFor('static');
+      const browserFetcher =
+        retailer.fetchStrategy === 'browser' ? fetcherFor('browser') : null;
+      const fetchText = async (url: string) => {
+        const staticRes = await staticFetcher.fetch(url);
+        if (staticRes.status >= 200 && staticRes.status < 300) return staticRes.html;
+        if (browserFetcher) {
+          const browserRes = await browserFetcher.fetch(url);
+          return browserRes.status >= 200 && browserRes.status < 300 ? browserRes.html : null;
+        }
+        return null;
+      };
+
+      for await (const url of adapter.discoverProductUrls({
+        categoryFilter,
+        limit,
+        fetchText,
+      })) {
         if (retailer.respectRobotsTxt && !(await isAllowed(url))) continue;
         await queues.fetch().add('fetch', { retailerKey, url, crawlRunId });
         discovered += 1;
@@ -52,7 +70,11 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
 
       await db
         .update(schema.crawlRuns)
-        .set({ urlsDiscovered: discovered })
+        .set({
+          urlsDiscovered: discovered,
+          status: discovered > 0 ? 'running' : 'completed',
+          finishedAt: discovered > 0 ? null : new Date(),
+        })
         .where(eq(schema.crawlRuns.id, crawlRunId));
       log.info('discovery complete', { retailerKey, discovered });
     },

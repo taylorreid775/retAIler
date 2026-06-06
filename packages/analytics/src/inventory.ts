@@ -1,7 +1,7 @@
 import { db, sql } from '@retailer/db';
-import { writeSignal } from './signals.js';
+import { writeSignal } from './signals';
 
-interface StockChangeRow {
+interface StockChangeRow extends Record<string, unknown> {
   retailer_product_id: string;
   retailer_id: string;
   product_id: string | null;
