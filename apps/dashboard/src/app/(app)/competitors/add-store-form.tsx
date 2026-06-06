@@ -1,10 +1,12 @@
 'use client';
 
 import { useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription } from '@retailer/ui';
 import { addStoreByUrl, type AddStoreResult } from './actions';
 
 export function AddStoreForm() {
+  const router = useRouter();
   const [url, setUrl] = useState('');
   const [pending, startTransition] = useTransition();
   const [result, setResult] = useState<AddStoreResult | null>(null);
@@ -16,6 +18,9 @@ export function AddStoreForm() {
       const res = await addStoreByUrl(url);
       setResult(res);
       if (!res.error) setUrl('');
+      // A pending hand-off adds an onboarding card to the list below; refresh
+      // so it shows up immediately.
+      if (res.pending) router.refresh();
     });
   };
 
@@ -56,12 +61,16 @@ export function AddStoreForm() {
           </p>
         ) : null}
 
-        {result?.discovery && !result.error ? (
-          <DiscoverySummary discovery={result.discovery} created />
+        {result?.pending ? (
+          <p className="text-sm text-[var(--muted-foreground)]">
+            Added — analyzing in the background. This site needs a real browser to read its
+            products, so it may take a minute. You can leave this page; we&apos;ll notify you when
+            it&apos;s ready.
+          </p>
         ) : null}
 
-        {result?.discovery && result.error ? (
-          <DiscoverySummary discovery={result.discovery} created={false} />
+        {result?.discovery && !result.error && !result.pending ? (
+          <DiscoverySummary discovery={result.discovery} created />
         ) : null}
       </CardContent>
     </Card>

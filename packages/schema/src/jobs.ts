@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 /** Queue names used across the platform. */
 export const QueueName = {
+  DiscoverConfig: 'store-discover-config',
   Discover: 'crawl-discover',
   Fetch: 'crawl-fetch',
   Extract: 'pipeline-extract',
@@ -10,6 +11,12 @@ export const QueueName = {
   Reports: 'reports-send',
 } as const;
 export type QueueName = (typeof QueueName)[keyof typeof QueueName];
+
+/** Discover a self-serve store's crawl config in the background (browser-capable). */
+export const DiscoverConfigJobSchema = z.object({
+  onboardingId: z.string().uuid(),
+});
+export type DiscoverConfigJob = z.infer<typeof DiscoverConfigJobSchema>;
 
 /** Discover URLs to crawl for a retailer (sitemaps / category walk). */
 export const DiscoverJobSchema = z.object({

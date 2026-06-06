@@ -1,5 +1,7 @@
 import { OrganizationSwitcher, UserButton } from '@clerk/nextjs';
 import { Sidebar } from '@/components/sidebar';
+import { ToastViewport } from '@/components/toast';
+import { OnboardingNotifier } from '@/components/onboarding-notifier';
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -16,6 +18,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         </header>
         <main className="flex-1 p-6">{children}</main>
       </div>
+      <OnboardingNotifier />
+      <ToastViewport />
     </div>
   );
 }

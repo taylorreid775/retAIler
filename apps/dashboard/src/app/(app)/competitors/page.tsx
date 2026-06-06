@@ -3,6 +3,7 @@ import { allRetailers } from '@/lib/retailers';
 import { NoOrg } from '@/components/empty-state';
 import { CompetitorList } from './competitor-list';
 import { AddStoreForm } from './add-store-form';
+import { getOnboardingStatuses } from './actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,7 +11,7 @@ export default async function CompetitorsPage() {
   const tenant = await getTenant();
   if (!tenant) return <NoOrg />;
 
-  const retailers = await allRetailers();
+  const [retailers, onboarding] = await Promise.all([allRetailers(), getOnboardingStatuses()]);
   const tracked = new Set(tenant.competitorRetailerIds);
 
   const options = retailers.map((r) => ({
@@ -30,7 +31,11 @@ export default async function CompetitorsPage() {
         </p>
       </div>
       <AddStoreForm />
-      <CompetitorList retailers={options} ownRetailerId={tenant.org.ownRetailerId} />
+      <CompetitorList
+        retailers={options}
+        ownRetailerId={tenant.org.ownRetailerId}
+        onboarding={onboarding}
+      />
     </div>
   );
 }

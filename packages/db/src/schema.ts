@@ -37,6 +37,13 @@ const vector = customType<{ data: number[]; driverData: string }>({
 export const fetchStrategyEnum = pgEnum('fetch_strategy', ['static', 'browser']);
 /** How a retailer entered the platform: built-in seed vs. self-serve URL onboarding. */
 export const retailerSourceEnum = pgEnum('retailer_source', ['seed', 'user']);
+/** Lifecycle of a self-serve store onboarding (URL → browser discovery → retailer). */
+export const onboardingStatusEnum = pgEnum('onboarding_status', [
+  'queued',
+  'discovering',
+  'ready',
+  'failed',
+]);
 export const availabilityEnum = pgEnum('availability', [
   'in_stock',
   'out_of_stock',
@@ -423,5 +430,33 @@ export const matchReviewQueue = pgTable('match_review_queue', {
   resolvedAt: timestamp('resolved_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Self-serve store onboarding. Tracks a URL submitted by an org while it is
+ * being discovered in the background (worker + browser). Only successful
+ * discoveries are promoted into a `retailers` row; failures stay here until the
+ * user dismisses them. Keeps failed attempts out of the retailers table.
+ */
+export const storeOnboarding = pgTable(
+  'store_onboarding',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    inputUrl: text('input_url').notNull(),
+    status: onboardingStatusEnum('status').notNull().default('queued'),
+    /** Set once discovery succeeds and a retailer row is created. */
+    retailerId: uuid('retailer_id').references(() => retailers.id, { onDelete: 'set null' }),
+    /** Snapshot of the discovery result for display (sitemap, pattern, etc.). */
+    result: jsonb('result'),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    orgTimeIdx: index('store_onboarding_org_time_idx').on(t.orgId, t.createdAt),
+  }),
+);
 
 export const schemaSql = sql; // re-export for migration helpers

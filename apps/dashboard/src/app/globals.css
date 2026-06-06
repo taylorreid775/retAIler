@@ -21,3 +21,17 @@ body {
   background: var(--background);
   color: var(--foreground);
 }
+
+/* Gentle background shimmer for in-progress onboarding cards. */
+@keyframes pulse-subtle {
+  0%,
+  100% {
+    background-color: var(--background);
+  }
+  50% {
+    background-color: var(--muted);
+  }
+}
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s ease-in-out infinite;
+}

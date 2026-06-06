@@ -2,6 +2,7 @@ import { Queue } from 'bullmq';
 import {
   QueueName,
   type AnalyticsJob,
+  type DiscoverConfigJob,
   type DiscoverJob,
   type ExtractJob,
   type FetchJob,
@@ -11,6 +12,7 @@ import {
 import { redisConnection } from './connection';
 
 type JobMap = {
+  [QueueName.DiscoverConfig]: DiscoverConfigJob;
   [QueueName.Discover]: DiscoverJob;
   [QueueName.Fetch]: FetchJob;
   [QueueName.Extract]: ExtractJob;
@@ -41,6 +43,7 @@ export function getQueue<K extends keyof JobMap>(name: K): Queue<JobMap[K]> {
 }
 
 export const queues = {
+  discoverConfig: () => getQueue(QueueName.DiscoverConfig),
   discover: () => getQueue(QueueName.Discover),
   fetch: () => getQueue(QueueName.Fetch),
   extract: () => getQueue(QueueName.Extract),

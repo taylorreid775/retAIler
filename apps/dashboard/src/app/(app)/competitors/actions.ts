@@ -1,7 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { db, schema, eq, and, or } from '@retailer/db';
+import { db, schema, eq, and, or, desc } from '@retailer/db';
 import { discoverSite } from '@retailer/crawler';
 import { queues } from '@retailer/jobs';
 import { getTenant } from '@/lib/tenant';
@@ -41,6 +41,11 @@ export interface AddStoreResult {
   error?: string;
   /** Set when an already-known store was tracked instead of created. */
   trackedExisting?: boolean;
+  /**
+   * Set when static discovery couldn't confirm products and the store was
+   * handed off to the worker for browser-backed discovery in the background.
+   */
+  pending?: boolean;
   discovery?: {
     name: string;
     domain: string;
@@ -119,12 +124,27 @@ export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
   }
 
   if (!discovery.productUrlPattern || discovery.confidence <= 0) {
-    return {
-      error:
-        'Could not confirm any product pages on that site, so a crawl could not be configured. ' +
-        `(${discovery.notes || 'no signals found'})`,
-      discovery: toDiscoveryView(discovery),
-    };
+    // Static discovery (no browser in the dashboard runtime) couldn't confirm
+    // products — likely a bot-walled / JS-only site (e.g. Walmart returns 307
+    // to non-browser clients). Hand off to the worker, which retries discovery
+    // through a real browser. Track progress in store_onboarding so the UI can
+    // show a pending card that persists across navigation.
+    const [onboarding] = await db
+      .insert(schema.storeOnboarding)
+      .values({
+        orgId: tenant.org.id,
+        inputUrl: input,
+        status: 'queued',
+        result: toDiscoveryView(discovery) ?? null,
+      })
+      .returning({ id: schema.storeOnboarding.id });
+    if (!onboarding) return { error: 'Failed to start background discovery' };
+
+    await queues.discoverConfig().add('discover-config', { onboardingId: onboarding.id });
+
+    revalidatePath('/competitors');
+    revalidatePath('/');
+    return { pending: true, discovery: toDiscoveryView(discovery) };
   }
 
   const [retailer] = await db
@@ -193,6 +213,59 @@ function slugifyHost(host: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 64);
+}
+
+/**
+ * Remove a `ready`/`failed` onboarding row from the org's list. `ready` rows
+ * have already been promoted to a tracked retailer, so dropping the onboarding
+ * record just clears the transient card; `failed` rows are dismissed manually.
+ */
+export async function dismissOnboarding(id: string): Promise<{ error?: string }> {
+  const tenant = await getTenant();
+  if (!tenant) return { error: 'No organization selected' };
+  await db
+    .delete(schema.storeOnboarding)
+    .where(
+      and(eq(schema.storeOnboarding.id, id), eq(schema.storeOnboarding.orgId, tenant.org.id)),
+    );
+  revalidatePath('/competitors');
+  revalidatePath('/');
+  return {};
+}
+
+export interface OnboardingStatus {
+  id: string;
+  inputUrl: string;
+  status: 'queued' | 'discovering' | 'ready' | 'failed';
+  error: string | null;
+  updatedAt: string;
+}
+
+/**
+ * Lightweight poll target for the site-wide notifier and the competitors list.
+ * Returns the org's non-dismissed onboarding rows.
+ */
+export async function getOnboardingStatuses(): Promise<OnboardingStatus[]> {
+  const tenant = await getTenant();
+  if (!tenant) return [];
+  const rows = await db
+    .select({
+      id: schema.storeOnboarding.id,
+      inputUrl: schema.storeOnboarding.inputUrl,
+      status: schema.storeOnboarding.status,
+      error: schema.storeOnboarding.error,
+      updatedAt: schema.storeOnboarding.updatedAt,
+    })
+    .from(schema.storeOnboarding)
+    .where(eq(schema.storeOnboarding.orgId, tenant.org.id))
+    .orderBy(desc(schema.storeOnboarding.createdAt));
+  return rows.map((r) => ({
+    id: r.id,
+    inputUrl: r.inputUrl,
+    status: r.status,
+    error: r.error,
+    updatedAt: r.updatedAt.toISOString(),
+  }));
 }
 
 export async function setOwnRetailer(retailerId: string | null): Promise<{ error?: string }> {

@@ -1,5 +1,6 @@
 import './load-env.js';
 import { createLogger } from '@retailer/core';
+import { startDiscoverConfigWorker } from './consumers/discover-config.js';
 import { startDiscoverWorker } from './consumers/discover.js';
 import { startFetchWorker } from './consumers/fetch.js';
 import { startExtractWorker } from './consumers/extract.js';
@@ -16,6 +17,7 @@ async function main() {
   log.info('starting crawl workers');
   const healthServer = startHealthServer();
   const workers = [
+    startDiscoverConfigWorker(),
     startDiscoverWorker(),
     startFetchWorker(),
     startExtractWorker(),
