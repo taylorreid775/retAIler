@@ -8,6 +8,13 @@
       "when": 1780275033708,
       "tag": "0000_organic_logan",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1780780500533,
+      "tag": "0001_exotic_glorian",
+      "breakpoints": true
     }
   ]
 }

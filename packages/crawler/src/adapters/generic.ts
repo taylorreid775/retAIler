@@ -30,7 +30,11 @@ export function createGenericAdapter(config: GenericAdapterConfig): RetailerAdap
     isProductUrl: (url: string) => pattern.test(url) && url.includes(config.domain),
     async *discoverProductUrls(ctx: DiscoverContext): AsyncGenerator<string> {
       let count = 0;
-      for await (const url of walkSitemap(sitemapUrl, (u) => pattern.test(u))) {
+      // Pass through the browser fetch override so JS/Cloudflare-protected
+      // sitemaps can still be read for browser-strategy retailers.
+      for await (const url of walkSitemap(sitemapUrl, (u) => pattern.test(u), {
+        fetchText: ctx.fetchText,
+      })) {
         if (ctx.categoryFilter && !ctx.categoryFilter.some((f) => url.toLowerCase().includes(f)))
           continue;
         yield url;

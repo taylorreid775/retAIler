@@ -27,20 +27,32 @@ export class BrowserFetcher implements Fetcher {
     return this.context;
   }
 
+  /** API request via Playwright (bypasses Akamai TLS fingerprint blocks on plain fetch). */
+  async fetchJson(url: string, headers: Record<string, string>): Promise<{ status: number; text: string }> {
+    const context = await this.ensure();
+    const response = await context.request.get(url, { headers });
+    return { status: response.status(), text: await response.text() };
+  }
+
   async fetch(url: string): Promise<FetchResult> {
     const context = await this.ensure();
     const page = await context.newPage();
     try {
       const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      // Give client-rendered PDPs a moment to hydrate price/availability.
+      const status = response?.status() ?? 0;
+      const contentType = response?.headers()['content-type'] ?? '';
+      const raw = response ? await response.text() : '';
+
+      // Sitemaps/XML: use the raw response body. page.content() is Chrome's XML
+      // viewer HTML and won't parse (MEC/Cloudflare sites hit this).
+      if (isXmlBody(url, contentType, raw)) {
+        return { url, status, html: raw, finalUrl: page.url() };
+      }
+
+      // PDPs: wait for client hydration, then snapshot the rendered DOM.
       await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
       const html = await page.content();
-      return {
-        url,
-        status: response?.status() ?? 0,
-        html,
-        finalUrl: page.url(),
-      };
+      return { url, status, html, finalUrl: page.url() };
     } finally {
       await page.close();
     }
@@ -52,4 +64,10 @@ export class BrowserFetcher implements Fetcher {
     this.context = null;
     this.browser = null;
   }
+}
+
+function isXmlBody(url: string, contentType: string, body: string): boolean {
+  if (contentType.includes('xml')) return true;
+  if (/\.xml(?:\?|$)/i.test(url)) return true;
+  return body.trimStart().startsWith('<?xml');
 }

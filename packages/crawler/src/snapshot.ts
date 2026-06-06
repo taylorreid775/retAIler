@@ -37,8 +37,10 @@ export async function storeSnapshot(
     token,
     contentType: 'text/html',
     addRandomSuffix: false,
+    // Snapshot keys are content-hash based, so overwriting is idempotent.
+    // Cast: older @vercel/blob types omit this option that newer runtimes honor.
     allowOverwrite: true,
-  });
+  } as Parameters<typeof put>[2]);
   return { blobKey, contentHash: hash, url: blob.url };
 }
 

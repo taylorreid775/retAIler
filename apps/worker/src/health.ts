@@ -11,7 +11,12 @@ const log = createLogger('worker:health');
  *  - GET /metrics → queue depths, crawl health, data freshness, review backlog
  * Point an uptime monitor / scrape job at these.
  */
-export function startHealthServer(port = Number(process.env.HEALTH_PORT ?? 8080)): Server {
+export function startHealthServer(port = Number(process.env.HEALTH_PORT ?? 8080)): Server | null {
+  if (process.env.HEALTH_PORT === '0') {
+    log.info('health server disabled (HEALTH_PORT=0)');
+    return null;
+  }
+
   const server = createServer(async (req, res) => {
     if (req.url === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -52,11 +57,11 @@ export function startHealthServer(port = Number(process.env.HEALTH_PORT ?? 8080)
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
-      log.error('health port already in use', {
+      log.warn('health port already in use — continuing without health server', {
         port,
-        hint: `kill the other worker (lsof -ti :${port} | xargs kill) or set HEALTH_PORT`,
+        hint: `kill the other worker (lsof -ti :${port} | xargs kill), set HEALTH_PORT to another port, or HEALTH_PORT=0 to skip`,
       });
-      process.exit(1);
+      return;
     }
     throw err;
   });

@@ -29,6 +29,13 @@ const SEED_RETAILERS = [
     fetchStrategy: 'browser' as const,
     requestDelayMs: 2000,
   },
+  {
+    key: 'decathlon',
+    name: 'Decathlon',
+    domain: 'www.decathlon.ca',
+    fetchStrategy: 'static' as const,
+    requestDelayMs: 2000,
+  },
 ];
 
 async function main() {

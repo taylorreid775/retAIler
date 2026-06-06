@@ -1,6 +1,29 @@
 # Onboarding a new retailer
 
-Two paths, depending on how cleanly the site exposes products.
+Three paths, in order of preference.
+
+## 0. Self-serve — add a store by URL (no code, no ops)
+
+Commercial users can add a store straight from the dashboard **Competitors**
+page ("Add a store"). Paste the store's homepage URL and the platform:
+
+1. Auto-discovers crawl config via `discoverSite()` (`packages/crawler/src/discovery.ts`):
+   reads `robots.txt` `Sitemap:` directives + crawl-delay, probes `llms.txt` /
+   agent files, resolves a sitemap (or falls back to a shallow homepage crawl),
+   then **confirms products by page content** (JSON-LD / microdata / `og:type`)
+   and derives the product-URL pattern + fetch strategy from the confirmed pages.
+2. Inserts a global `retailers` row with `source = 'user'` and the discovered
+   config (`homepage_url`, `sitemap_url`, `product_url_pattern`, `llms_txt_url`).
+3. Tracks the store for the org (counts against the plan's competitor limit) and
+   enqueues an immediate `crawl-discover` job.
+
+The worker's discover consumer builds a generic adapter from the row on the fly
+(`resolveAdapter()` in `apps/worker/src/consumers/discover.ts`) — no code or
+redeploy needed. The crawl only runs once a worker is consuming the queue.
+
+If discovery can't confirm any product pages (e.g. a fully JS-rendered site,
+since the dashboard has no browser fetcher), the store is **not** created and the
+UI reports what was/wasn't found. Use path 1 or 2 below for those.
 
 ## 1. Fast path — generic sitemap adapter (no code)
 

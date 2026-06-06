@@ -11,6 +11,15 @@ const nextConfig: NextConfig = {
   ],
   // drizzle/postgres are server-only; keep them out of the client bundle.
   serverExternalPackages: ['postgres', 'drizzle-orm'],
+  webpack: (config, { dev }) => {
+    if (dev) {
+      config.watchOptions = {
+        ...config.watchOptions,
+        ignored: ['**/node_modules/**', '**/.git/**', '**/.next/**'],
+      };
+    }
+    return config;
+  },
 };
 
 export default nextConfig;

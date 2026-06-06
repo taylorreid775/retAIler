@@ -7,6 +7,8 @@ export interface DiscoverContext {
   limit?: number;
   /** Override HTTP fetch (e.g. Playwright for Cloudflare-protected sitemaps). */
   fetchText?: (url: string) => Promise<string | null>;
+  /** JSON fetch with retailer-specific headers (e.g. Sport Chek search API). */
+  fetchJson?: (url: string) => Promise<unknown | null>;
 }
 
 /**
@@ -22,6 +24,12 @@ export interface RetailerAdapter {
 
   /** Yields product-detail-page URLs to crawl. */
   discoverProductUrls(ctx: DiscoverContext): AsyncGenerator<string>;
+
+  /**
+   * Optional API-native discovery that yields fully parsed products (skips
+   * fetch/extract). Used by Sport Chek's public search API.
+   */
+  discoverProducts?(ctx: DiscoverContext): AsyncGenerator<RawExtractedProduct>;
 
   /** True if a URL looks like a product detail page for this retailer. */
   isProductUrl(url: string): boolean;

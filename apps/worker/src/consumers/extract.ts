@@ -6,6 +6,7 @@ import { ingestExtractedProduct } from '@retailer/pipeline';
 import { QueueName, type ExtractJob } from '@retailer/schema';
 import { getRetailer } from '../retailers.js';
 import { fetcherFor } from '../fetchers.js';
+import { loadLocalSnapshot } from '../local-snapshots.js';
 
 const log = createLogger('worker:extract');
 
@@ -26,11 +27,15 @@ export function startExtractWorker(): Worker<ExtractJob> {
       if (snapshotUrl) {
         html = await loadSnapshot(snapshotUrl);
       } else {
-        html = (await fetcherFor(retailer.fetchStrategy).fetch(url)).html;
+        const { snapshotKey } = job.data;
+        const local = await loadLocalSnapshot(snapshotKey);
+        html = local ?? (await fetcherFor(retailer.fetchStrategy).fetch(url)).html;
       }
 
       const raw = await extractProduct(html, url, retailerKey, {
         custom: adapter?.parseProduct?.bind(adapter),
+        // Adapter parsers are authoritative — skip rate-limited LLM fallback.
+        allowLlm: !adapter?.parseProduct,
       });
       if (!raw) {
         log.warn('no product extracted', { url });

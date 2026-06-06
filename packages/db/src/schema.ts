@@ -35,6 +35,8 @@ const vector = customType<{ data: number[]; driverData: string }>({
 
 // ─── Enums ──────────────────────────────────────────────────────────────
 export const fetchStrategyEnum = pgEnum('fetch_strategy', ['static', 'browser']);
+/** How a retailer entered the platform: built-in seed vs. self-serve URL onboarding. */
+export const retailerSourceEnum = pgEnum('retailer_source', ['seed', 'user']);
 export const availabilityEnum = pgEnum('availability', [
   'in_stock',
   'out_of_stock',
@@ -86,6 +88,18 @@ export const retailers = pgTable(
     fetchStrategy: fetchStrategyEnum('fetch_strategy').notNull().default('static'),
     useProxy: boolean('use_proxy').notNull().default(false),
     crawlSchedule: text('crawl_schedule').notNull().default('0 6 * * *'),
+    // ── Self-serve onboarding (auto-discovered crawl config) ──
+    source: retailerSourceEnum('source').notNull().default('seed'),
+    /** Homepage URL the user submitted (origin used to derive everything else). */
+    homepageUrl: text('homepage_url'),
+    /** Discovered sitemap entry point used by the generic adapter. */
+    sitemapUrl: text('sitemap_url'),
+    /** Discovered product-detail URL pattern (substring or regex source). */
+    productUrlPattern: text('product_url_pattern'),
+    /** Discovered llms.txt URL, if any (metadata only). */
+    llmsTxtUrl: text('llms_txt_url'),
+    /** Human-readable summary of what discovery found / could not find. */
+    discoveryNotes: text('discovery_notes'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

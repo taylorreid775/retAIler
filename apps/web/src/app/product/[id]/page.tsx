@@ -92,6 +92,8 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
                   <TableCell className="text-right">
                     <Link
                       href={`/go/${o.retailerProductId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 rounded-md bg-brand-600 px-3 py-1.5 text-xs font-medium text-white"
                     >
                       View deal <ExternalLink className="h-3 w-3" />

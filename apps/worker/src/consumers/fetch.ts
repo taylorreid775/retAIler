@@ -6,6 +6,7 @@ import { recordSnapshot } from '@retailer/pipeline';
 import { QueueName, type FetchJob } from '@retailer/schema';
 import { getRetailer } from '../retailers.js';
 import { fetcherFor } from '../fetchers.js';
+import { storeLocalSnapshot } from '../local-snapshots.js';
 
 const log = createLogger('worker:fetch');
 
@@ -53,6 +54,9 @@ export function startFetchWorker(): Worker<FetchJob> {
       }
 
       const snapshot = await storeSnapshot(retailerKey, result.html);
+      if (!snapshot.url) {
+        await storeLocalSnapshot(snapshot.blobKey, result.html);
+      }
       await recordSnapshot({
         retailerId: retailer.id,
         url,

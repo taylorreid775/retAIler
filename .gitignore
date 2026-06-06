@@ -13,6 +13,9 @@ build/
 # Turbo
 .turbo/
 
+# Worker local HTML snapshots (dev, when Blob unconfigured)
+apps/worker/.snapshots/
+
 # Env
 .env
 .env.local

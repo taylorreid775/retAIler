@@ -32,7 +32,7 @@ async function main() {
 
   const shutdown = async (signal: string) => {
     log.info('shutting down', { signal });
-    healthServer.close();
+    healthServer?.close();
     await Promise.all(workers.map((w) => w.close()));
     await closeFetchers();
     process.exit(0);
