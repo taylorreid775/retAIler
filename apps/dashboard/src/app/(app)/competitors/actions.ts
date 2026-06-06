@@ -1,7 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { db, schema, eq, and, or, desc } from '@retailer/db';
+import { db, schema, eq, and, or, desc, inArray } from '@retailer/db';
 import { discoverSite } from '@retailer/crawler';
 import { queues } from '@retailer/jobs';
 import { getTenant } from '@/lib/tenant';
@@ -37,6 +37,14 @@ export async function removeCompetitor(retailerId: string): Promise<{ error?: st
   return {};
 }
 
+export interface StartAddStoreResult {
+  error?: string;
+  trackedExisting?: boolean;
+  /** Set when a new store onboarding row was created and discovery should run. */
+  onboardingId?: string;
+  inputUrl?: string;
+}
+
 export interface AddStoreResult {
   error?: string;
   /** Set when an already-known store was tracked instead of created. */
@@ -60,31 +68,34 @@ export interface AddStoreResult {
   };
 }
 
-/**
- * Self-serve onboarding: add a store from its homepage URL. If the store is
- * already known, just track it. Otherwise auto-discover its crawl config
- * (sitemap / robots / llms.txt / product-URL pattern / fetch strategy), create
- * a global retailer row, track it for this org, and enqueue an immediate crawl.
- */
-export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
-  const tenant = await getTenant();
-  if (!tenant) return { error: 'No organization selected' };
-
+/** Normalize a user-entered store URL to a canonical https form. */
+function normalizeStoreUrl(rawUrl: string): { input: string; host: string } | { error: string } {
   const input = rawUrl.trim();
   if (!input) return { error: 'Enter a store URL' };
-
-  let host: string;
   try {
     const withProto = /^https?:\/\//i.test(input) ? input : `https://${input}`;
-    host = new URL(withProto).host;
+    const host = new URL(withProto).host;
+    if (!host) return { error: 'That does not look like a valid URL' };
+    return { input: withProto, host };
   } catch {
     return { error: 'That does not look like a valid URL' };
   }
-  if (!host) return { error: 'That does not look like a valid URL' };
+}
 
+/**
+ * Fast first step: validate, dedupe, and create a `store_onboarding` row
+ * immediately so the UI can show a persistent pending card before any slow
+ * discovery work runs.
+ */
+export async function startAddStoreByUrl(rawUrl: string): Promise<StartAddStoreResult> {
+  const tenant = await getTenant();
+  if (!tenant) return { error: 'No organization selected' };
+
+  const parsed = normalizeStoreUrl(rawUrl);
+  if ('error' in parsed) return { error: parsed.error };
+  const { input, host } = parsed;
   const key = slugifyHost(host);
 
-  // Already in the platform? Just track it (subject to plan limits).
   const [existing] = await db
     .select()
     .from(schema.retailers)
@@ -107,45 +118,130 @@ export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
     return { trackedExisting: true };
   }
 
-  // New store counts as a tracked competitor — enforce the plan limit up front.
   if (tenant.competitorRetailerIds.length >= tenant.limits.maxCompetitors) {
     return {
       error: `Your ${tenant.org.plan} plan allows ${tenant.limits.maxCompetitors} competitors. Upgrade to add more.`,
     };
   }
 
-  // Auto-discover crawl config from the homepage. No browser fetcher is
-  // available in the dashboard runtime, so JS-only sites may not confirm here.
-  let discovery;
+  // Re-use an in-flight onboarding for the same URL instead of duplicating.
+  const [inFlight] = await db
+    .select({ id: schema.storeOnboarding.id })
+    .from(schema.storeOnboarding)
+    .where(
+      and(
+        eq(schema.storeOnboarding.orgId, tenant.org.id),
+        eq(schema.storeOnboarding.inputUrl, input),
+        inArray(schema.storeOnboarding.status, ['queued', 'discovering']),
+      ),
+    );
+  if (inFlight) {
+    return { onboardingId: inFlight.id, inputUrl: input };
+  }
+
+  const [onboarding] = await db
+    .insert(schema.storeOnboarding)
+    .values({
+      orgId: tenant.org.id,
+      inputUrl: input,
+      status: 'discovering',
+    })
+    .returning({ id: schema.storeOnboarding.id });
+  if (!onboarding) return { error: 'Failed to start store onboarding' };
+
+  revalidatePath('/competitors');
+  revalidatePath('/');
+  return { onboardingId: onboarding.id, inputUrl: input };
+}
+
+/**
+ * Second step: run a quick static discovery pass in the dashboard. Easy sites
+ * are promoted immediately; bot-protected sites are handed off to the worker
+ * without blocking the UI for minutes.
+ */
+export async function processAddStoreByUrl(onboardingId: string): Promise<AddStoreResult> {
+  const tenant = await getTenant();
+  if (!tenant) return { error: 'No organization selected' };
+
+  const [onboarding] = await db
+    .select()
+    .from(schema.storeOnboarding)
+    .where(
+      and(eq(schema.storeOnboarding.id, onboardingId), eq(schema.storeOnboarding.orgId, tenant.org.id)),
+    );
+  if (!onboarding) return { error: 'Onboarding not found' };
+  if (onboarding.status === 'ready') return { discovery: onboarding.result as AddStoreResult['discovery'] };
+  if (onboarding.status === 'failed') {
+    return { error: onboarding.error ?? 'Discovery failed' };
+  }
+
+  const input = onboarding.inputUrl;
+
+  let discovery: Awaited<ReturnType<typeof discoverSite>> | null = null;
   try {
-    discovery = await discoverSite(input);
+    // Cap wall-clock time so bot-walled sites hand off quickly instead of
+    // wedging the server action (and the button spinner) for minutes.
+    discovery = await Promise.race([
+      discoverSite(input, { sampleLimit: 8, corpusLimit: 50 }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 12_000)),
+    ]);
   } catch (err) {
+    await markOnboardingFailed(onboardingId, `Could not analyze that site: ${String(err)}`);
+    revalidatePath('/competitors');
+    revalidatePath('/');
     return { error: `Could not analyze that site: ${String(err)}` };
   }
 
-  if (!discovery.productUrlPattern || discovery.confidence <= 0) {
-    // Static discovery (no browser in the dashboard runtime) couldn't confirm
-    // products — likely a bot-walled / JS-only site (e.g. Walmart returns 307
-    // to non-browser clients). Hand off to the worker, which retries discovery
-    // through a real browser. Track progress in store_onboarding so the UI can
-    // show a pending card that persists across navigation.
-    const [onboarding] = await db
-      .insert(schema.storeOnboarding)
-      .values({
-        orgId: tenant.org.id,
-        inputUrl: input,
-        status: 'queued',
-        result: toDiscoveryView(discovery) ?? null,
-      })
-      .returning({ id: schema.storeOnboarding.id });
-    if (!onboarding) return { error: 'Failed to start background discovery' };
-
-    await queues.discoverConfig().add('discover-config', { onboardingId: onboarding.id });
-
-    revalidatePath('/competitors');
-    revalidatePath('/');
-    return { pending: true, discovery: toDiscoveryView(discovery) };
+  if (!discovery?.productUrlPattern || discovery.confidence <= 0) {
+    return handOffToWorker(onboardingId, discovery);
   }
+
+  return promoteDiscoveredStore(tenant.org.id, onboardingId, discovery);
+}
+
+/** @deprecated Use startAddStoreByUrl + processAddStoreByUrl for responsive UI. */
+export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
+  const start = await startAddStoreByUrl(rawUrl);
+  if (start.error || start.trackedExisting || !start.onboardingId) {
+    return start;
+  }
+  return processAddStoreByUrl(start.onboardingId);
+}
+
+async function handOffToWorker(
+  onboardingId: string,
+  discovery: Awaited<ReturnType<typeof discoverSite>> | null,
+): Promise<AddStoreResult> {
+  const view = discovery ? toDiscoveryView(discovery) : null;
+  await db
+    .update(schema.storeOnboarding)
+    .set({
+      status: 'queued',
+      result: view,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.storeOnboarding.id, onboardingId));
+
+  await queues.discoverConfig().add('discover-config', { onboardingId });
+
+  revalidatePath('/competitors');
+  revalidatePath('/');
+  return { pending: true, discovery: view ?? undefined };
+}
+
+async function markOnboardingFailed(onboardingId: string, error: string): Promise<void> {
+  await db
+    .update(schema.storeOnboarding)
+    .set({ status: 'failed', error, updatedAt: new Date() })
+    .where(eq(schema.storeOnboarding.id, onboardingId));
+}
+
+async function promoteDiscoveredStore(
+  orgId: string,
+  onboardingId: string,
+  discovery: Awaited<ReturnType<typeof discoverSite>>,
+): Promise<AddStoreResult> {
+  const view = toDiscoveryView(discovery);
 
   const [retailer] = await db
     .insert(schema.retailers)
@@ -160,8 +256,6 @@ export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
       requestDelayMs: discovery.crawlDelayMs ?? 3000,
       fetchStrategy: discovery.fetchStrategy,
       homepageUrl: discovery.homepageUrl,
-      // Store every product-bearing sitemap (newline-separated); the worker
-      // walks all of them when building the generic adapter.
       sitemapUrl: (discovery.sitemapUrls.length ? discovery.sitemapUrls : [discovery.sitemapUrl])
         .filter(Boolean)
         .join('\n'),
@@ -170,14 +264,18 @@ export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
       discoveryNotes: discovery.notes,
     })
     .returning();
-  if (!retailer) return { error: 'Failed to create the store record' };
+  if (!retailer) {
+    await markOnboardingFailed(onboardingId, 'Failed to create the store record');
+    revalidatePath('/competitors');
+    revalidatePath('/');
+    return { error: 'Failed to create the store record' };
+  }
 
   await db
     .insert(schema.orgCompetitors)
-    .values({ orgId: tenant.org.id, retailerId: retailer.id })
+    .values({ orgId, retailerId: retailer.id })
     .onConflictDoNothing();
 
-  // Kick off an immediate crawl. It only runs once a worker consumes the queue.
   const [run] = await db
     .insert(schema.crawlRuns)
     .values({ retailerId: retailer.id, status: 'queued' })
@@ -186,9 +284,20 @@ export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
     await queues.discover().add('discover', { retailerKey: retailer.key, crawlRunId: run.id });
   }
 
+  await db
+    .update(schema.storeOnboarding)
+    .set({
+      status: 'ready',
+      retailerId: retailer.id,
+      result: view,
+      error: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.storeOnboarding.id, onboardingId));
+
   revalidatePath('/competitors');
   revalidatePath('/');
-  return { discovery: toDiscoveryView(discovery) };
+  return { discovery: view };
 }
 
 function toDiscoveryView(d: Awaited<ReturnType<typeof discoverSite>>): AddStoreResult['discovery'] {

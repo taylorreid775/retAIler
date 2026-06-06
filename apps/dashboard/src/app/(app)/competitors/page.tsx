@@ -1,8 +1,7 @@
 import { getTenant } from '@/lib/tenant';
 import { allRetailers } from '@/lib/retailers';
 import { NoOrg } from '@/components/empty-state';
-import { CompetitorList } from './competitor-list';
-import { AddStoreForm } from './add-store-form';
+import { CompetitorsSection } from './competitors-section';
 import { getOnboardingStatuses } from './actions';
 
 export const dynamic = 'force-dynamic';
@@ -30,8 +29,7 @@ export default async function CompetitorsPage() {
           on the {tenant.org.plan} plan.
         </p>
       </div>
-      <AddStoreForm />
-      <CompetitorList
+      <CompetitorsSection
         retailers={options}
         ownRetailerId={tenant.org.ownRetailerId}
         onboarding={onboarding}

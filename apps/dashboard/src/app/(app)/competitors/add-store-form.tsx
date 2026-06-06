@@ -3,24 +3,56 @@
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Card, CardContent, CardHeader, CardTitle, CardDescription } from '@retailer/ui';
-import { addStoreByUrl, type AddStoreResult } from './actions';
+import {
+  startAddStoreByUrl,
+  processAddStoreByUrl,
+  type AddStoreResult,
+} from './actions';
 
-export function AddStoreForm() {
+export function AddStoreForm({
+  onOptimisticStart,
+  onComplete,
+}: {
+  onOptimisticStart?: (inputUrl: string) => void;
+  onComplete?: () => void;
+}) {
   const router = useRouter();
   const [url, setUrl] = useState('');
   const [pending, startTransition] = useTransition();
   const [result, setResult] = useState<AddStoreResult | null>(null);
 
   const submit = () => {
-    if (!url.trim()) return;
+    const trimmed = url.trim();
+    if (!trimmed) return;
     setResult(null);
+
+    const normalized =
+      /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    onOptimisticStart?.(normalized);
+
     startTransition(async () => {
-      const res = await addStoreByUrl(url);
+      const start = await startAddStoreByUrl(trimmed);
+      if (start.error || start.trackedExisting) {
+        onComplete?.();
+        setResult(start);
+        router.refresh();
+        return;
+      }
+      if (!start.onboardingId) {
+        onComplete?.();
+        setResult({ error: 'Failed to start store onboarding' });
+        router.refresh();
+        return;
+      }
+
+      // DB row exists — refresh so the persistent "Being added" card appears.
+      setUrl('');
+      router.refresh();
+
+      const res = await processAddStoreByUrl(start.onboardingId);
+      onComplete?.();
       setResult(res);
-      if (!res.error) setUrl('');
-      // A pending hand-off adds an onboarding card to the list below; refresh
-      // so it shows up immediately.
-      if (res.pending) router.refresh();
+      router.refresh();
     });
   };
 
@@ -49,7 +81,7 @@ export function AddStoreForm() {
             className="flex-1 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-60"
           />
           <Button onClick={submit} disabled={pending || !url.trim()}>
-            {pending ? 'Analyzing…' : 'Add store'}
+            {pending ? 'Adding…' : 'Add store'}
           </Button>
         </div>
 
@@ -63,9 +95,8 @@ export function AddStoreForm() {
 
         {result?.pending ? (
           <p className="text-sm text-[var(--muted-foreground)]">
-            Added — analyzing in the background. This site needs a real browser to read its
-            products, so it may take a minute. You can leave this page; we&apos;ll notify you when
-            it&apos;s ready.
+            Handed off to background analysis. Protected sites can take a minute — you can leave
+            this page and we&apos;ll notify you when it&apos;s ready.
           </p>
         ) : null}
 
