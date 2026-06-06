@@ -88,7 +88,14 @@ function DiscoverySummary({
         <dt>Domain</dt>
         <dd className="text-[var(--foreground)]">{discovery.domain}</dd>
         <dt>Sitemap</dt>
-        <dd className="break-all text-[var(--foreground)]">{discovery.sitemapUrl ?? 'not found'}</dd>
+        <dd className="break-all text-[var(--foreground)]">
+          {discovery.sitemapUrl ?? 'not found'}
+          {discovery.sitemapUrls.length > 1
+            ? ` (+${discovery.sitemapUrls.length - 1} more product sitemap${
+                discovery.sitemapUrls.length - 1 === 1 ? '' : 's'
+              })`
+            : ''}
+        </dd>
         <dt>Product pattern</dt>
         <dd className="text-[var(--foreground)]">{discovery.productUrlPattern ?? 'unknown'}</dd>
         <dt>llms.txt</dt>

@@ -53,7 +53,10 @@ export interface SiteDiscovery {
   domain: string;
   /** Normalized origin the user effectively submitted. */
   homepageUrl: string;
+  /** Primary product-bearing sitemap (for display / back-compat). */
   sitemapUrl: string | null;
+  /** All sitemaps confirmed to contain products — the crawl walks every one. */
+  sitemapUrls: string[];
   /** Regex source string identifying product-detail URLs (or null if unknown). */
   productUrlPattern: string | null;
   /** A few confirmed product URLs (evidence). */
@@ -122,48 +125,64 @@ export async function discoverSite(
     notes.push('homepage fetch returned no HTML');
   }
 
-  // ── resolve a working sitemap (authoritative first, then probe) ──
-  const sitemapCandidates = dedupe([
-    ...robotsSitemaps,
-    ...linkRelSitemaps,
-    ...SITEMAP_NAME_CANDIDATES.map((n) => `${origin}/${n}`),
-  ]);
+  // ── resolve candidate sitemaps (authoritative first, then probe) ──
+  // robots.txt often lists MANY sitemaps (categories, brands, products, …) as
+  // separate top-level entries, so we must sample across all of them — not stop
+  // at the first. Product-looking names are tried first to confirm quickly.
+  const sitemapCandidates = prioritizeProductSitemaps(
+    dedupe([
+      ...robotsSitemaps,
+      ...linkRelSitemaps,
+      ...SITEMAP_NAME_CANDIDATES.map((n) => `${origin}/${n}`),
+    ]),
+  );
 
-  let sitemapUrl: string | null = null;
-  let corpus: string[] = [];
-  for (const candidate of sitemapCandidates) {
-    const urls = await collectFromSitemap(candidate, corpusLimit, opts.fetchText, ua);
-    if (urls.length > 0) {
-      sitemapUrl = candidate;
-      corpus = urls;
-      notes.push(`sitemap ${candidate} yielded ${urls.length} URL(s)`);
-      break;
+  // ── build a corpus spread across multiple sitemaps, tracking provenance ──
+  const MAX_SITEMAPS = 20;
+  const chosenSitemaps = sitemapCandidates.slice(0, MAX_SITEMAPS);
+  const perSitemap = Math.max(20, Math.ceil(corpusLimit / Math.max(1, chosenSitemaps.length)));
+  const corpus: { url: string; sitemap: string }[] = [];
+  const usedSitemaps = new Set<string>();
+  for (const candidate of chosenSitemaps) {
+    if (corpus.length >= corpusLimit) break;
+    const urls = await collectFromSitemap(candidate, perSitemap, opts.fetchText, ua);
+    for (const u of urls) {
+      corpus.push({ url: u, sitemap: candidate });
+      usedSitemaps.add(candidate);
+      if (corpus.length >= corpusLimit) break;
     }
+  }
+  if (usedSitemaps.size) {
+    notes.push(`sampled ${corpus.length} URL(s) across ${usedSitemaps.size} sitemap(s)`);
   }
 
   // ── fallback: shallow BFS from the homepage when no sitemap works ──
   if (corpus.length === 0) {
     notes.push('no usable sitemap; falling back to homepage link crawl');
-    corpus = await shallowCrawl(origin, host, ua, opts.fetchText, homepageLinks, corpusLimit);
+    const links = await shallowCrawl(origin, host, ua, opts.fetchText, homepageLinks, corpusLimit);
+    for (const u of links) corpus.push({ url: u, sitemap: '' });
   }
 
   // ── classify a spread of candidates by content ──
   const sample = spread(corpus, sampleLimit);
   const confirmed: string[] = [];
+  const productSitemaps = new Set<string>();
   let confirmedViaBrowserOnly = false;
   let staticConfirmed = false;
 
-  for (const url of sample) {
-    const staticHtml = await fetchText(url, ua);
-    if (staticHtml && hasProductSignals(staticHtml, url)) {
-      confirmed.push(url);
+  for (const entry of sample) {
+    const staticHtml = await fetchText(entry.url, ua);
+    if (staticHtml && hasProductSignals(staticHtml, entry.url)) {
+      confirmed.push(entry.url);
+      if (entry.sitemap) productSitemaps.add(entry.sitemap);
       staticConfirmed = true;
       continue;
     }
     if (opts.fetchText) {
-      const renderedHtml = await opts.fetchText(url);
-      if (renderedHtml && hasProductSignals(renderedHtml, url)) {
-        confirmed.push(url);
+      const renderedHtml = await opts.fetchText(entry.url);
+      if (renderedHtml && hasProductSignals(renderedHtml, entry.url)) {
+        confirmed.push(entry.url);
+        if (entry.sitemap) productSitemaps.add(entry.sitemap);
         confirmedViaBrowserOnly = true;
       }
     }
@@ -171,6 +190,10 @@ export async function discoverSite(
 
   const confidence = sample.length ? confirmed.length / sample.length : 0;
   const productUrlPattern = deriveProductPattern(confirmed);
+
+  // Sitemaps that produced a confirmed product are what the crawl should walk.
+  const sitemapUrls = [...productSitemaps];
+  const sitemapUrl = sitemapUrls[0] ?? [...usedSitemaps][0] ?? null;
   const fetchStrategy: 'static' | 'browser' =
     staticConfirmed || (!confirmedViaBrowserOnly && !opts.fetchText) ? 'static' : 'browser';
 
@@ -198,6 +221,7 @@ export async function discoverSite(
     domain: host,
     homepageUrl: origin,
     sitemapUrl,
+    sitemapUrls,
     productUrlPattern,
     sampleProductUrls: confirmed.slice(0, 5),
     confidence,
@@ -498,6 +522,21 @@ async function urlExists(url: string, ua: string): Promise<boolean> {
 }
 
 // ─── Misc utilities ────────────────────────────────────────────────────────
+
+/**
+ * Order sitemap URLs so product-looking ones are sampled first (e.g.
+ * `sitemap-product-1p-en.xml` before `sitemap-categories.xml`). Pure ordering
+ * hint — non-product sitemaps are still sampled, just later.
+ */
+function prioritizeProductSitemaps(candidates: string[]): string[] {
+  const score = (url: string): number => {
+    const u = url.toLowerCase();
+    if (/(product|\/ip[-/]|item|\/p[-/]|pdp|\bsku\b)/.test(u)) return 0;
+    if (/(category|categories|collection|brand|page|topic|article|blog)/.test(u)) return 2;
+    return 1;
+  };
+  return [...candidates].sort((a, b) => score(a) - score(b));
+}
 
 function parseRobotsSitemaps(robotsText: string): string[] {
   const out: string[] = [];

@@ -45,6 +45,7 @@ export interface AddStoreResult {
     name: string;
     domain: string;
     sitemapUrl: string | null;
+    sitemapUrls: string[];
     productUrlPattern: string | null;
     llmsTxtUrl: string | null;
     fetchStrategy: 'static' | 'browser';
@@ -139,7 +140,11 @@ export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
       requestDelayMs: discovery.crawlDelayMs ?? 3000,
       fetchStrategy: discovery.fetchStrategy,
       homepageUrl: discovery.homepageUrl,
-      sitemapUrl: discovery.sitemapUrl,
+      // Store every product-bearing sitemap (newline-separated); the worker
+      // walks all of them when building the generic adapter.
+      sitemapUrl: (discovery.sitemapUrls.length ? discovery.sitemapUrls : [discovery.sitemapUrl])
+        .filter(Boolean)
+        .join('\n'),
       productUrlPattern: discovery.productUrlPattern,
       llmsTxtUrl: discovery.llmsTxtUrl,
       discoveryNotes: discovery.notes,
@@ -171,6 +176,7 @@ function toDiscoveryView(d: Awaited<ReturnType<typeof discoverSite>>): AddStoreR
     name: d.name,
     domain: d.domain,
     sitemapUrl: d.sitemapUrl,
+    sitemapUrls: d.sitemapUrls,
     productUrlPattern: d.productUrlPattern,
     llmsTxtUrl: d.llmsTxtUrl,
     fetchStrategy: d.fetchStrategy,

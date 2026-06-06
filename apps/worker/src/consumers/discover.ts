@@ -29,11 +29,16 @@ function resolveAdapter(retailer: RetailerRow): RetailerAdapter | undefined {
   if (existing) return existing;
 
   if (retailer.sitemapUrl && retailer.productUrlPattern) {
+    // sitemapUrl may hold several newline-separated product sitemaps.
+    const sitemapUrls = retailer.sitemapUrl
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
     const adapter = createGenericAdapter({
       key: retailer.key,
       name: retailer.name,
       domain: retailer.domain,
-      sitemapUrl: retailer.sitemapUrl,
+      sitemapUrl: sitemapUrls.length > 1 ? sitemapUrls : sitemapUrls[0],
       productUrlPattern: retailer.productUrlPattern,
     });
     registerAdapter(adapter);
