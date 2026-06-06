@@ -65,9 +65,9 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
 
       const inputUrl = onboarding.inputUrl;
 
-      // Static-first, browser-fallback fetcher: sitemaps/robots fetch fast over
-      // HTTP; only bot-walled PDPs render via the browser. Passing a fetchText
-      // override makes discoverSite resolve fetchStrategy to 'browser'.
+      // Browser-capable fetchText for HTML pages only (homepage nav, PDP
+      // confirmation). Sitemap collection in discoverSite always uses static
+      // HTTP regardless of this override.
       const staticFetcher = fetcherFor('static');
       const browserFetcher = fetcherFor('browser') as BrowserFetcher;
       const fetchText = async (url: string): Promise<string | null> => {

@@ -145,7 +145,10 @@ export async function discoverSite(
   const usedSitemaps = new Set<string>();
   for (const candidate of chosenSitemaps) {
     if (corpus.length >= corpusLimit) break;
-    const urls = await collectFromSitemap(candidate, perSitemap, opts.fetchText, ua);
+    // Sitemaps are XML/plain-text — always fetch statically. Passing the
+    // browser-capable fetchText override here breaks sites like Walmart where
+    // static HTTP reads sitemaps fine but PDPs need Playwright.
+    const urls = await collectFromSitemap(candidate, perSitemap, undefined, ua);
     for (const u of urls) {
       corpus.push({ url: u, sitemap: candidate });
       usedSitemaps.add(candidate);
