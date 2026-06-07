@@ -3,6 +3,7 @@ import { allRetailers } from '@/lib/retailers';
 import { NoOrg } from '@/components/empty-state';
 import { CompetitorsSection } from './competitors-section';
 import { getOnboardingStatuses } from './actions';
+import { isDevCrawlNowEnabled } from '@/lib/dev-flags';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,6 +16,7 @@ export default async function CompetitorsPage() {
 
   const options = retailers.map((r) => ({
     id: r.id,
+    key: r.key,
     name: r.name,
     domain: r.domain,
     tracked: tracked.has(r.id),
@@ -33,6 +35,7 @@ export default async function CompetitorsPage() {
         retailers={options}
         ownRetailerId={tenant.org.ownRetailerId}
         onboarding={onboarding}
+        devCrawlNowEnabled={isDevCrawlNowEnabled()}
       />
     </div>
   );

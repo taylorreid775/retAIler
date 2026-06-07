@@ -8,12 +8,14 @@ import {
   removeCompetitor,
   setOwnRetailer,
   dismissOnboarding,
+  triggerCrawlNow,
   type OnboardingStatus,
 } from './actions';
 import { OnboardingCard } from './onboarding-card';
 
 export interface RetailerOption {
   id: string;
+  key: string;
   name: string;
   domain: string;
   tracked: boolean;
@@ -23,14 +25,17 @@ export function CompetitorList({
   retailers,
   ownRetailerId,
   onboarding = [],
+  devCrawlNowEnabled = false,
 }: {
   retailers: RetailerOption[];
   ownRetailerId: string | null;
   onboarding?: OnboardingStatus[];
+  devCrawlNowEnabled?: boolean;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [crawlQueued, setCrawlQueued] = useState<string | null>(null);
 
   // Poll for status changes while any onboarding row is still in progress.
   const hasActive = onboarding.some((o) => o.status === 'queued' || o.status === 'discovering');
@@ -56,6 +61,19 @@ export function CompetitorList({
     startTransition(async () => {
       await dismissOnboarding(id);
       router.refresh();
+    });
+
+  const crawlNow = (r: RetailerOption) =>
+    startTransition(async () => {
+      setError(null);
+      setCrawlQueued(null);
+      const res = await triggerCrawlNow(r.id);
+      if (res.error) {
+        setError(res.error);
+        return;
+      }
+      setCrawlQueued(r.id);
+      setTimeout(() => setCrawlQueued(null), 4000);
     });
 
   // Show pending/failed cards inline at the top. `ready` rows have already been
@@ -93,7 +111,18 @@ export function CompetitorList({
               <p className="font-medium">{r.name}</p>
               <p className="text-xs text-[var(--muted-foreground)]">{r.domain}</p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {devCrawlNowEnabled ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => crawlNow(r)}
+                  title="Dev only — queues an immediate crawl via Redis"
+                >
+                  {crawlQueued === r.id ? 'Queued ✓' : 'Crawl now'}
+                </Button>
+              ) : null}
               <Button
                 variant={r.id === ownRetailerId ? 'default' : 'outline'}
                 size="sm"

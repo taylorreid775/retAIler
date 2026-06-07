@@ -26,7 +26,7 @@
     "@retailer/reports": "workspace:*",
     "@retailer/schema": "workspace:*",
     "dotenv": "^16.4.5",
-    "playwright": "^1.49.0",
+    "playwright": "1.60.0",
     "react": "^19.0.0",
     "tsx": "^4.19.2"
   },

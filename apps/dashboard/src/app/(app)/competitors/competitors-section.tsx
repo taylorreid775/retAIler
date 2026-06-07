@@ -9,10 +9,12 @@ export function CompetitorsSection({
   retailers,
   ownRetailerId,
   onboarding,
+  devCrawlNowEnabled = false,
 }: {
   retailers: RetailerOption[];
   ownRetailerId: string | null;
   onboarding: OnboardingStatus[];
+  devCrawlNowEnabled?: boolean;
 }) {
   const [optimistic, setOptimistic] = useState<OnboardingStatus[]>([]);
 
@@ -50,6 +52,7 @@ export function CompetitorsSection({
         retailers={retailers}
         ownRetailerId={ownRetailerId}
         onboarding={mergedOnboarding}
+        devCrawlNowEnabled={devCrawlNowEnabled}
       />
     </>
   );

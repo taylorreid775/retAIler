@@ -4,7 +4,13 @@ import {
   type Currency,
   type RawExtractedProduct,
 } from '@retailer/schema';
+import { createLogger } from '@retailer/core';
 import { type DiscoverContext } from '../adapters/types';
+
+const log = createLogger('crawler:api-recipe');
+
+/** Cool down between category slices after heavy pagination (APIM rate limits). */
+const CATEGORY_COOLDOWN_MS = 20_000;
 
 const ENV_DEFAULTS: Record<string, string> = {
   SPORTCHEK_STORE: '383',
@@ -139,7 +145,17 @@ export async function* discoverProductsFromApiRecipe(
     ? categoriesForFilter(api, ctx.categoryFilter)
     : [{ value: '', label: '' }];
 
-  for (const category of categories) {
+  for (let catIdx = 0; catIdx < categories.length; catIdx++) {
+    const category = categories[catIdx]!;
+    if (catIdx > 0) await sleep(CATEGORY_COOLDOWN_MS);
+
+    log.info('category start', {
+      retailerKey,
+      category: category.value || 'all',
+      label: category.label,
+      discoveredSoFar: count,
+    });
+
     let page = 1;
     let totalPages: number | undefined;
     const pagination = api.pagination;
@@ -157,11 +173,14 @@ export async function* discoverProductsFromApiRecipe(
       query[pagination.pageParam] = String(page);
 
       const url = buildApiUrl(api.baseUrl, query);
-      const data = (await ctx.fetchJson(url, api.headers)) as Record<string, unknown> | null;
+      const data = await fetchPageWithRetry(ctx, url, api.headers);
       const productsRaw = data ? getAtPath(data, api.productsPath) : null;
       const products = Array.isArray(productsRaw) ? productsRaw : [];
 
-      if (!products.length) break;
+      if (!products.length) {
+        log.warn('category page empty', { retailerKey, category: category.value, page });
+        break;
+      }
 
       if (page === 1 && pagination.totalPagesPath) {
         const total = getAtPath(data, pagination.totalPagesPath);
@@ -196,4 +215,20 @@ export async function* discoverProductsFromApiRecipe(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Retry catalog fetches — Sport Chek APIM rate-limits after ~100 pages. */
+async function fetchPageWithRetry(
+  ctx: DiscoverContext,
+  url: string,
+  headers: Record<string, string>,
+  attempts = 4,
+): Promise<Record<string, unknown> | null> {
+  for (let i = 0; i < attempts; i++) {
+    const data = (await ctx.fetchJson!(url, headers)) as Record<string, unknown> | null;
+    if (data) return data;
+    const wait = Math.min(30_000, 3_000 * 2 ** i);
+    await sleep(wait);
+  }
+  return null;
 }

@@ -1,5 +1,5 @@
 # Playwright base image ships Chromium + system deps for headless crawling.
-FROM mcr.microsoft.com/playwright:v1.49.0-noble
+FROM mcr.microsoft.com/playwright:v1.60.0-noble
 
 WORKDIR /app
 ENV NODE_ENV=production

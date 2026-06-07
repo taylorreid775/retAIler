@@ -16,6 +16,6 @@ export function startMatchWorker(): Worker<MatchJob> {
       const outcome = await matchRetailerProduct(job.data.retailerProductId);
       log.debug('match outcome', outcome);
     },
-    { connection: redisConnection(), concurrency: 2 },
+    { connection: redisConnection(), concurrency: 4 },
   );
 }

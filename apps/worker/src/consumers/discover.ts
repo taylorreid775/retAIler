@@ -74,7 +74,7 @@ function resolveAdapter(retailer: RetailerRow): RetailerAdapter | undefined {
 export function startDiscoverWorker(): Worker<DiscoverJob> {
   const limit = process.env.DISCOVER_LIMIT ? Number(process.env.DISCOVER_LIMIT) : undefined;
 
-  return new Worker<DiscoverJob>(
+  const worker = new Worker<DiscoverJob>(
     QueueName.Discover,
     async (job: Job<DiscoverJob>) => {
       const { retailerKey, categoryFilter } = job.data;
@@ -88,6 +88,13 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
       }
       if (!retailer.enabled) {
         log.warn('retailer disabled, skipping', { retailerKey });
+        const skipRunId = job.data.crawlRunId;
+        if (skipRunId && skipRunId !== SCHEDULED_RUN_SENTINEL) {
+          await db
+            .update(schema.crawlRuns)
+            .set({ status: 'failed', finishedAt: new Date() })
+            .where(eq(schema.crawlRuns.id, skipRunId));
+        }
         return;
       }
 
@@ -115,26 +122,22 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
         log,
       });
 
+      // Catalog/search JSON APIs use plain fetch — no Playwright (faster, no browser binary lock-in).
       const fetchJson = async (
         url: string,
         headers: Record<string, string> = {},
       ): Promise<unknown | null> => {
-        if (browserFetcher) {
-          const res = await browserFetcher.fetchJson(url, headers);
-          if (res.status < 200 || res.status >= 300) {
+        try {
+          const res = await fetch(url, { headers, signal: AbortSignal.timeout(45_000) });
+          if (!res.ok) {
             log.warn('API JSON fetch failed', { url, status: res.status });
             return null;
           }
-          try {
-            return JSON.parse(res.text) as unknown;
-          } catch {
-            log.warn('API returned non-JSON', { url });
-            return null;
-          }
+          return (await res.json()) as unknown;
+        } catch (err) {
+          log.warn('API JSON fetch error', { url, err: String(err) });
+          return null;
         }
-        const res = await fetch(url, { headers });
-        if (!res.ok) return null;
-        return res.json() as Promise<unknown>;
       };
 
       const discoverCtx = { categoryFilter, limit, fetchText, fetchJson };
@@ -142,8 +145,15 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
       if (adapter.discoverProducts) {
         for await (const raw of adapter.discoverProducts(discoverCtx)) {
           const { retailerProductId } = await ingestExtractedProduct(retailer.id, raw);
-          await queues.match().add('match', { retailerProductId });
+          void queues.match().add('match', { retailerProductId });
           discovered += 1;
+          if (discovered % 50 === 0) {
+            await db
+              .update(schema.crawlRuns)
+              .set({ urlsDiscovered: discovered, productsExtracted: discovered })
+              .where(eq(schema.crawlRuns.id, crawlRunId));
+            log.info('API discovery progress', { retailerKey, discovered });
+          }
         }
 
         await db
@@ -178,6 +188,29 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
       }
       log.info('discovery complete', { retailerKey, discovered });
     },
-    { connection: redisConnection(), concurrency: 1 },
+    {
+      connection: redisConnection(),
+      concurrency: 1,
+      // Full-catalog API crawls can run 30–60+ minutes.
+      lockDuration: 3_600_000,
+    },
   );
+
+  worker.on('failed', async (job, err) => {
+    const crawlRunId = job?.data.crawlRunId;
+    if (!crawlRunId || crawlRunId === SCHEDULED_RUN_SENTINEL) return;
+    const maxAttempts = job.opts.attempts ?? 3;
+    if (job.attemptsMade < maxAttempts) return;
+    await db
+      .update(schema.crawlRuns)
+      .set({ status: 'failed', finishedAt: new Date() })
+      .where(eq(schema.crawlRuns.id, crawlRunId));
+    log.error('discover job failed', {
+      retailerKey: job.data.retailerKey,
+      crawlRunId,
+      err: String(err),
+    });
+  });
+
+  return worker;
 }

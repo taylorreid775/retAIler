@@ -5,6 +5,7 @@ import { db, schema, eq, and, or, desc, inArray } from '@retailer/db';
 import { discoverSite } from '@retailer/crawler';
 import { queues } from '@retailer/jobs';
 import { getTenant } from '@/lib/tenant';
+import { isDevCrawlNowEnabled } from '@/lib/dev-flags';
 
 export async function addCompetitor(retailerId: string): Promise<{ error?: string }> {
   const tenant = await getTenant();
@@ -390,4 +391,38 @@ export async function setOwnRetailer(retailerId: string | null): Promise<{ error
   revalidatePath('/competitors');
   revalidatePath('/seo');
   return {};
+}
+
+/** Dev-only: enqueue an immediate discover crawl for a retailer (same as worker CLI `enqueue`). */
+export async function triggerCrawlNow(
+  retailerId: string,
+): Promise<{ error?: string; crawlRunId?: string }> {
+  if (!isDevCrawlNowEnabled()) {
+    return { error: 'Crawl now is disabled (set ENABLE_DEV_CRAWL_NOW=true while testing).' };
+  }
+
+  const tenant = await getTenant();
+  if (!tenant) return { error: 'No organization selected' };
+
+  const [retailer] = await db
+    .select()
+    .from(schema.retailers)
+    .where(eq(schema.retailers.id, retailerId));
+  if (!retailer) return { error: 'Store not found' };
+  if (!retailer.enabled) return { error: 'Store is disabled' };
+
+  const [run] = await db
+    .insert(schema.crawlRuns)
+    .values({ retailerId: retailer.id, status: 'queued' })
+    .returning({ id: schema.crawlRuns.id });
+  if (!run) return { error: 'Failed to create crawl run' };
+
+  await queues.discover().add('discover', {
+    retailerKey: retailer.key,
+    crawlRunId: run.id,
+  });
+
+  revalidatePath('/competitors');
+  revalidatePath('/status');
+  return { crawlRunId: run.id };
 }

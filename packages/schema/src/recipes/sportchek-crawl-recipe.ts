@@ -65,8 +65,8 @@ export const SPORTCHEK_CRAWL_RECIPE: CrawlRecipe = {
       pageParam: 'page',
       itemsPerPage: 10,
       totalPagesPath: 'pagination.total',
-      maxPages: 100,
-      delayMs: 500,
+      maxPages: 300,
+      delayMs: 800,
     },
     productsPath: 'products',
     fieldMap: {
