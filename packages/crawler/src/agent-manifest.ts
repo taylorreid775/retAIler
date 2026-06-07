@@ -25,7 +25,8 @@ export interface AgentManifestHints {
 }
 
 const URL_RE = /https?:\/\/[^\s)\]"'<>]+/gi;
-const PRODUCT_PATH_TOKENS = ['products', 'product', 'ip', 'p', 'item', 'sku', 'dp', 'pd'];
+const PRODUCT_PATH_TOKENS = ['products', 'product', 'pdp', 'ip', 'p', 'item', 'sku', 'dp', 'pd'];
+const MEDIA_EXT = /\.(png|jpe?g|webp|gif|svg|glb|avif|mp4)(\?|$)/i;
 
 /**
  * Fetch and parse the best available agent manifest (llms.txt, etc.).
@@ -193,7 +194,14 @@ function detectPlatform(lower: string, urls: string[]): CrawlRecipe['platform'] 
   if (lower.includes('bigcommerce') || urls.some((u) => u.includes('bigcommerce.com'))) return 'bigcommerce';
   if (lower.includes('shopify') || urls.some((u) => u.includes('myshopify.com') || u.includes('cdn.shopify.com')))
     return 'shopify';
-  if (lower.includes('salesforce') || lower.includes('demandware')) return 'salesforce';
+  if (
+    lower.includes('salesforce') ||
+    lower.includes('demandware') ||
+    lower.includes('canadian tire') ||
+    /\/pdp\//.test(lower)
+  )
+    return 'salesforce';
+  if (lower.includes('magento') || urls.some((u) => u.includes('/media/catalog/product/'))) return 'unknown';
   return 'unknown';
 }
 
@@ -231,7 +239,11 @@ function isSitemapUrl(url: string): boolean {
 
 function isProductDetailUrl(url: string): boolean {
   try {
-    const path = new URL(url).pathname.toLowerCase();
+    const u = new URL(url);
+    if (MEDIA_EXT.test(u.pathname)) return false;
+    const path = u.pathname.toLowerCase();
+    if (/\/pdp\//.test(path)) return true;
+    if (/\/p-[^/]+/.test(path)) return true;
     return PRODUCT_PATH_TOKENS.some((t) => path.includes(`/${t}/`));
   } catch {
     return false;
@@ -241,10 +253,17 @@ function isProductDetailUrl(url: string): boolean {
 function pathPatternFromUrl(url: string): string | null {
   try {
     const u = new URL(url);
+    const path = u.pathname.toLowerCase();
+    if (/\/pdp\//.test(path)) return '/pdp/';
+    if (/\/p-[^/]+/.test(path)) return '/p-/';
     const parts = u.pathname.split('/').filter(Boolean);
     if (parts.length < 2) return null;
-    // Keep first two segments as pattern anchor: /en/product, /products
-    return `/${parts.slice(0, 2).join('/')}/`;
+    const anchor = parts.slice(0, 2).join('/');
+    // Reject full product slugs mistaken for patterns (Mark's llms.txt samples).
+    if (anchor.length > 32 && !PRODUCT_PATH_TOKENS.some((t) => anchor.includes(`/${t}/`))) {
+      return null;
+    }
+    return `/${anchor}/`;
   } catch {
     return null;
   }

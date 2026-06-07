@@ -2,7 +2,11 @@ import { gunzipSync } from 'node:zlib';
 import { XMLParser } from 'fast-xml-parser';
 import { createLogger } from '@retailer/core';
 
-const parser = new XMLParser({ ignoreAttributes: false });
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  maxNestedTags: 10_000,
+  processEntities: false,
+});
 const log = createLogger('crawler:sitemap');
 
 interface SitemapNode {
@@ -50,7 +54,10 @@ export async function* walkSitemap(
   try {
     doc = parser.parse(text) as Record<string, unknown>;
   } catch (err) {
-    log.warn('sitemap parse error', { sitemapUrl, err: String(err) });
+    log.warn('sitemap parse error, trying loc fallback', { sitemapUrl, err: String(err) });
+    for (const url of parseLocFallback(text)) {
+      if (urlFilter(url)) yield url;
+    }
     return;
   }
 
@@ -96,6 +103,14 @@ export async function* walkSitemap(
     return;
   }
 
+  const fallback = parseLocFallback(text);
+  if (fallback.length) {
+    for (const url of fallback) {
+      if (urlFilter(url)) yield url;
+    }
+    return;
+  }
+
   log.warn('sitemap had no recognized URL container', { sitemapUrl });
 }
 
@@ -128,19 +143,7 @@ async function fetchSitemapText(
   sitemapUrl: string,
   opts: WalkSitemapOptions,
 ): Promise<string | null> {
-  if (opts.fetchText) {
-    try {
-      const text = await opts.fetchText(sitemapUrl);
-      if (!text) {
-        log.warn('sitemap fetch failed', { sitemapUrl, via: 'custom' });
-        return null;
-      }
-      return text;
-    } catch (err) {
-      log.warn('sitemap fetch error', { sitemapUrl, via: 'custom', err: String(err) });
-      return null;
-    }
-  }
+  const browserFetch = opts.fetchText;
 
   try {
     const res = await fetch(sitemapUrl, {
@@ -149,16 +152,25 @@ async function fetchSitemapText(
         accept: 'application/xml,text/xml,application/gzip,text/plain,*/*',
       },
     });
-    if (!res.ok) {
-      log.warn('sitemap fetch failed', { sitemapUrl, status: res.status });
-      return null;
+    if (res.ok) {
+      const buf = Buffer.from(await res.arrayBuffer());
+      const decoded = decodeMaybeGzip(buf, sitemapUrl);
+      if (looksLikeXml(decoded)) return decoded;
     }
-    const buf = Buffer.from(await res.arrayBuffer());
-    return decodeMaybeGzip(buf, sitemapUrl);
   } catch (err) {
     log.warn('sitemap fetch error', { sitemapUrl, err: String(err) });
-    return null;
   }
+
+  if (browserFetch) {
+    try {
+      const text = await browserFetch(sitemapUrl);
+      if (text) return text;
+    } catch (err) {
+      log.warn('sitemap fetch error', { sitemapUrl, via: 'browser', err: String(err) });
+    }
+  }
+
+  return null;
 }
 
 /** Gunzip when the body is a `.xml.gz` file or starts with the gzip magic bytes. */
@@ -178,6 +190,16 @@ function decodeMaybeGzip(buf: Buffer, url: string): string {
 function looksLikeXml(text: string): boolean {
   const head = text.slice(0, 512).trimStart();
   return head.startsWith('<');
+}
+
+/** Regex fallback when fast-xml-parser chokes on huge Magento sitemaps. */
+function parseLocFallback(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)) {
+    const loc = m[1]?.trim();
+    if (loc) out.push(loc);
+  }
+  return out;
 }
 
 function parsePlainText(text: string): string[] {

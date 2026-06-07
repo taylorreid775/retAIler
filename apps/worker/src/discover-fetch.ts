@@ -19,7 +19,9 @@ export function looksLikeBotWall(html: string, finalUrl?: string): boolean {
     head.includes('captcha') ||
     head.includes('px-captcha') ||
     head.includes('access denied') ||
-    head.includes('robot or human')
+    head.includes('robot or human') ||
+    head.includes('_incapsula_resource') ||
+    head.includes('incapsula incident id')
   );
 }
 
@@ -53,13 +55,17 @@ export function createDiscoverFetchText(opts: {
 
     const tryBrowser = async (): Promise<string | null> => {
       if (!browserFetcher) return null;
-      try {
-        const res = await browserFetcher.fetch(url);
-        return res.status >= 200 && res.status < 300 ? res.html : null;
-      } catch (err) {
-        log.warn('browser fetch error', { url, err: String(err) });
-        return null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const res = await browserFetcher.fetch(url);
+          const html = res.status >= 200 && res.status < 300 ? res.html : null;
+          if (html && !looksLikeBotWall(html, res.finalUrl)) return html;
+        } catch (err) {
+          log.warn('browser fetch error', { url, attempt, err: String(err) });
+        }
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 2500));
       }
+      return null;
     };
 
     if (isSitemapLikeUrl(url)) {

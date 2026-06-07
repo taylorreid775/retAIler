@@ -35,6 +35,7 @@ const SITEMAP_NAME_CANDIDATES = [
   'sitemap-index.xml',
   'sitemap.xml.gz',
   'sitemap',
+  'media/sitemaps/sitemap.xml',
 ];
 
 export interface SiteDiscovery {
@@ -92,7 +93,7 @@ export async function discoverSite(
   const sampleLimit = opts.sampleLimit ?? 30;
   const corpusLimit = opts.corpusLimit ?? 400;
 
-  const origin = normalizeOrigin(inputUrl);
+  const origin = resolveStoreOrigin(inputUrl);
   const host = new URL(origin).host;
   const notes: string[] = [];
 
@@ -118,6 +119,8 @@ export async function discoverSite(
   const homepageLinks: string[] = [];
   const linkRelSitemaps: string[] = [];
   if (homepageHtml) {
+    const shutdown = detectSiteShutdown(homepageHtml);
+    if (shutdown) notes.push(shutdown);
     const $ = cheerio.load(homepageHtml);
     $('link[rel="sitemap"]').each((_, el) => {
       const href = $(el).attr('href');
@@ -133,8 +136,13 @@ export async function discoverSite(
   // robots.txt often lists MANY sitemaps (categories, brands, products, …) as
   // separate top-level entries, so we must sample across all of them — not stop
   // at the first. Product-looking names are tried first to confirm quickly.
+  const ctProductSitemap = host.endsWith('.ca')
+    ? [`${origin}/sitemap_Product-en_CA-CAD.xml`, `${origin}/sitemap_product-en_CA-CAD.xml`]
+    : [];
+
   const sitemapCandidates = prioritizeProductSitemaps(
     dedupe([
+      ...ctProductSitemap,
       ...(agentManifest?.sitemapUrls ?? []),
       ...robotsSitemaps,
       ...linkRelSitemaps,
@@ -150,10 +158,9 @@ export async function discoverSite(
   const usedSitemaps = new Set<string>();
   for (const candidate of chosenSitemaps) {
     if (corpus.length >= corpusLimit) break;
-    // Sitemaps are XML/plain-text — always fetch statically. Passing the
-    // browser-capable fetchText override here breaks sites like Walmart where
-    // static HTTP reads sitemaps fine but PDPs need Playwright.
-    const urls = await collectFromSitemap(candidate, perSitemap, undefined, ua);
+    // Prefer static sitemap fetch; escalate to browser when static returns a
+    // bot-wall HTML page (Atmosphere/Mark's index) while PDPs still need Playwright.
+    const urls = await collectFromSitemap(candidate, perSitemap, opts.fetchText, ua);
     for (const u of urls) {
       corpus.push({ url: u, sitemap: candidate });
       usedSitemaps.add(candidate);
@@ -206,6 +213,9 @@ export async function discoverSite(
     let evidence = confirmFromSitemapUrlEvidence(corpus, sampleLimit);
     if (evidence.length < 3) {
       evidence = confirmFromPathEvidence(corpus, sampleLimit);
+    }
+    if (evidence.length < 3) {
+      evidence = confirmFromHtmlProductEvidence(corpus, sampleLimit);
     }
     if (evidence.length >= 3) {
       for (const url of evidence) {
@@ -298,7 +308,8 @@ async function collectFromSitemap(
     const children = await getSitemapChildren(sitemapUrl, walkOpts);
     if (children && children.length > 1) {
       const MAX_CHILDREN = 12;
-      const chosen = spread(children, MAX_CHILDREN);
+      const ranked = [...children].sort((a, b) => scoreSitemapChild(b) - scoreSitemapChild(a));
+      const chosen = spread(ranked, MAX_CHILDREN);
       const perChild = Math.max(5, Math.ceil(limit / chosen.length));
       const out: string[] = [];
       for (const child of chosen) {
@@ -509,7 +520,11 @@ export function deriveProductPattern(confirmedUrls: string[]): string | null {
   const lcpSpecific = lcp.length >= 2 || (lcp.length === 1 && lcp[0]!.length >= 4);
   if (lcpSpecific) return `/${lcp.join('/')}/`;
 
-  // 2) Highest-frequency known product token present in a majority of URLs.
+  // 2) Sports Experts / similar: segment starts with p- (e.g. /fr-CA/p-hikelite.../id/id).
+  const pSlugCount = segArrays.filter((arr) => arr.some((s) => s.startsWith('p-'))).length;
+  if (pSlugCount >= majority) return '/p-/';
+
+  // 3) Highest-frequency known product token present in a majority of URLs.
   let best: string | null = null;
   let bestCount = -1;
   for (const prior of PRODUCT_PATH_PRIORS) {
@@ -521,10 +536,10 @@ export function deriveProductPattern(confirmedUrls: string[]): string | null {
   }
   if (best) return `/${best}/`;
 
-  // 3) Fall back to the (possibly short) common prefix if there was one.
+  // 4) Fall back to the (possibly short) common prefix if there was one.
   if (lcp.length > 0) return `/${lcp.join('/')}/`;
 
-  // 4) Any non-trivial segment shared by a majority of URLs.
+  // 5) Any non-trivial segment shared by a majority of URLs.
   for (const [seg, c] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
     if (c >= majority && seg.length >= 2) return `/${seg}/`;
   }
@@ -601,7 +616,15 @@ async function urlExists(url: string, ua: string): Promise<boolean> {
  * hint — non-product sitemaps are still sampled, just later.
  */
 /** Product-detail path tokens seen across major retailers. */
-const PRODUCT_PATH_RE = /\/(?:p-|p\/|products?\/|ip\/|item\/|sku\/)/i;
+const PRODUCT_PATH_RE = /\/(?:p-|p\/|pdp\/|products?\/|ip\/|item\/|sku\/)/i;
+
+/** Common user typos / marketing-site → shop redirects. */
+const DOMAIN_ALIASES: Record<string, string> = {
+  'www.national-sports.com': 'https://www.nationalsports.com',
+  'national-sports.com': 'https://www.nationalsports.com',
+  'www.runningroom.com': 'https://ca.shop.runningroom.com',
+  'runningroom.com': 'https://ca.shop.runningroom.com',
+};
 
 /**
  * When PDP HTML cannot be fetched (bot wall), accept URLs from product sitemaps
@@ -623,6 +646,49 @@ function confirmFromSitemapUrlEvidence(
   return spread(urls, Math.min(limit, 10));
 }
 
+const CATEGORY_HTML_TOKENS =
+  /\/(brands|sale|apparel|gear|men|women|kids|accessories|nutrition|clearance|store-locator|our-story|rr)\//i;
+
+/** Magento-style flat .html product URLs (Running Room and similar). */
+function confirmFromHtmlProductEvidence(
+  corpus: { url: string; sitemap: string }[],
+  limit: number,
+): string[] {
+  const urls = dedupe(
+    corpus
+      .filter((e) => {
+        try {
+          const u = new URL(e.url);
+          const path = u.pathname.toLowerCase();
+          const segs = path.split('/').filter(Boolean);
+          const leaf = segs[segs.length - 1] ?? '';
+          return (
+            /\.html?(\?|$)/.test(path) &&
+            !CATEGORY_HTML_TOKENS.test(path) &&
+            !/\/(c\/|category|catalogsearch|checkout|customer|cart|account)\//.test(path) &&
+            segs.length >= 2 &&
+            segs.length <= 4 &&
+            leaf.length >= 12 &&
+            !/^(brands|sale|index)\.html$/.test(leaf)
+          );
+        } catch {
+          return false;
+        }
+      })
+      .map((e) => e.url),
+  );
+  if (urls.length < 5) return [];
+  return spread(urls, Math.min(limit, 10));
+}
+
+function detectSiteShutdown(html: string): string | null {
+  const head = html.slice(0, 8000).toLowerCase();
+  if (head.includes('consolidation notice') || head.includes('no longer operating')) {
+    return 'site appears closed or consolidated (store may no longer sell products online)';
+  }
+  return null;
+}
+
 /** Path-only evidence when PDP HTML is blocked but corpus has product-like URLs. */
 function confirmFromPathEvidence(
   corpus: { url: string; sitemap: string }[],
@@ -631,6 +697,14 @@ function confirmFromPathEvidence(
   const urls = dedupe(corpus.filter((e) => PRODUCT_PATH_RE.test(e.url)).map((e) => e.url));
   if (urls.length < 3) return [];
   return spread(urls, Math.min(limit, 10));
+}
+
+/** Prefer product-bearing child sitemaps (e.g. sitemap_Product-en_CA-CAD.xml). */
+function scoreSitemapChild(url: string): number {
+  const u = url.toLowerCase();
+  if (/(product|\/pdp|item-detail)/.test(u)) return 3;
+  if (/(category|brand|collection|page)/.test(u)) return 0;
+  return 1;
 }
 
 function prioritizeProductSitemaps(candidates: string[]): string[] {
@@ -656,6 +730,15 @@ function parseRobotsSitemaps(robotsText: string): string[] {
 function normalizeOrigin(input: string): string {
   const withProto = /^https?:\/\//i.test(input) ? input : `https://${input}`;
   return new URL(withProto).origin;
+}
+
+/** Map marketing domains to the storefront origin users intend to track. */
+function resolveStoreOrigin(input: string): string {
+  const withProto = /^https?:\/\//i.test(input) ? input : `https://${input}`;
+  const host = new URL(withProto).host.toLowerCase();
+  const alias = DOMAIN_ALIASES[host];
+  if (alias) return new URL(alias).origin;
+  return normalizeOrigin(input);
 }
 
 function absolute(href: string, origin: string): string {

@@ -3,6 +3,7 @@ import { createLogger } from '@retailer/core';
 import { db, schema, eq, or, count } from '@retailer/db';
 import {
   discoverSite,
+  deriveProductPattern,
   inferApiRecipeFromCaptures,
   mergeApiIntoDiscovery,
   validateApiRecipe,
@@ -94,18 +95,42 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         discovery = await tryNetworkApiDiscovery(inputUrl, discovery);
       }
 
+      const effectivePattern =
+        discovery.productUrlPattern ?? deriveProductPattern(discovery.sampleProductUrls);
+      if (effectivePattern && !discovery.productUrlPattern) {
+        discovery = {
+          ...discovery,
+          productUrlPattern: effectivePattern,
+          crawlRecipe: {
+            ...discovery.crawlRecipe,
+            productUrlPattern: effectivePattern,
+          },
+        };
+      }
+
       const view = toDiscoveryView(discovery);
       const hasApiRecipe =
         discovery.crawlRecipe.discoveryMode === 'api' && discovery.crawlRecipe.api != null;
+      const minSamples = effectivePattern === '/products/' || effectivePattern === '/pdp/' ? 2 : 3;
+      const hasPathEvidence =
+        !!effectivePattern &&
+        discovery.sampleProductUrls.length >= minSamples &&
+        (discovery.confidence > 0 || discovery.notes.includes('path pattern'));
 
-      if ((!discovery.productUrlPattern || discovery.confidence <= 0) && !hasApiRecipe) {
+      if (!hasApiRecipe && !hasPathEvidence && (!effectivePattern || discovery.confidence <= 0)) {
         log.warn('no products confirmed', { onboardingId, inputUrl, notes: discovery.notes });
-        await markFailed(
-          onboardingId,
-          'Could not confirm any product pages on that site, so a crawl could not be configured.' +
-            (discovery.notes ? ` (${discovery.notes})` : ''),
-          view,
-        );
+        const shutdown = discovery.notes.includes('consolidated') || discovery.notes.includes('no longer');
+        const botWall =
+          discovery.notes.includes('content fetch blocked') ||
+          discovery.notes.includes('homepage fetch returned no HTML');
+        let msg = 'Could not confirm any product pages on that site, so a crawl could not be configured.';
+        if (shutdown) {
+          msg = 'This store appears to be closed or consolidated and may no longer sell products online.';
+        } else if (botWall && inputUrl.includes('sportsexperts')) {
+          msg =
+            'Sports Experts blocks automated access (Incapsula). We cannot sniff their catalog API yet.';
+        }
+        await markFailed(onboardingId, msg + (discovery.notes ? ` (${discovery.notes})` : ''), view);
         return;
       }
 

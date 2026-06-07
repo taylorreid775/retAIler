@@ -16,6 +16,13 @@ function seedUrlsFor(inputUrl: string): string[] {
   if (host.endsWith('.ca')) {
     seeds.push(`${origin}/en-CA`, `${origin}/fr-CA`, `${origin}/en-ca`);
   }
+  // Category/listing pages trigger catalog search APIs (CT family, Magento+Klevu).
+  if (host.includes('marks.com') || host.includes('atmosphere.ca') || host.includes('sportchek.ca')) {
+    seeds.push(`${origin}/en/c/men`, `${origin}/en/c/women`);
+  }
+  if (host.includes('runningroom.com') || host.includes('shop.runningroom.com')) {
+    seeds.push(`${origin}/men-s-running-shoes`, `${origin}/women-s-running-shoes`);
+  }
   return [...new Set(seeds)];
 }
 
@@ -47,7 +54,7 @@ export async function captureNetworkJson(inputUrl: string): Promise<CapturedJson
       locale: 'en-CA',
     });
 
-    for (const pageUrl of seeds.slice(0, 4)) {
+    for (const pageUrl of seeds.slice(0, 6)) {
       const page = await context.newPage();
       page.on('response', (response) => {
         void (async () => {
