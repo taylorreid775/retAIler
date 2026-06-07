@@ -169,6 +169,7 @@ export function buildCrawlRecipe(params: {
     agentFileUrl: params.agent?.agentFileUrl ?? null,
     notes,
     confidence,
+    api: null,
   };
 }
 

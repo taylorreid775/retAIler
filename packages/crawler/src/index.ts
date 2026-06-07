@@ -8,3 +8,4 @@ export * from './agent-manifest';
 export * from './snapshot';
 export * from './extract/index';
 export * from './adapters/index';
+export * from './discover/api-recipe';

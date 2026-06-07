@@ -1,4 +1,53 @@
 import { z } from 'zod';
+import { CurrencySchema } from './common';
+
+/** Pagination settings for API-based catalog discovery. */
+export const ApiPaginationSchema = z.object({
+  pageParam: z.string().default('page'),
+  itemsPerPage: z.number().int().positive().optional(),
+  /** Dot-path to total page count (e.g. pagination.total). */
+  totalPagesPath: z.string().nullable().optional(),
+  maxPages: z.number().int().positive().default(100),
+  delayMs: z.number().int().nonnegative().default(500),
+});
+
+export const ApiCategoryValueSchema = z.object({
+  value: z.string(),
+  label: z.string().optional(),
+  key: z.string().optional(),
+});
+
+/** Optional dimension to iterate (e.g. Sport Chek `group=MEN`). */
+export const ApiCategoryParamSchema = z.object({
+  name: z.string(),
+  values: z.array(ApiCategoryValueSchema).min(1),
+});
+
+/**
+ * Generic replay config for retailer catalog/search APIs discovered at
+ * onboarding (network sniff or manual recipe). No per-site TypeScript required.
+ */
+export const ApiRecipeSchema = z.object({
+  baseUrl: z.string().url(),
+  method: z.enum(['GET', 'POST']).default('GET'),
+  headers: z.record(z.string()).default({}),
+  /** Query params merged on every request. Values `{VAR}` resolve from env. */
+  staticQuery: z.record(z.string()).default({}),
+  categoryParam: ApiCategoryParamSchema.optional(),
+  pagination: ApiPaginationSchema.default({}),
+  /** Dot-path to the products array in the JSON response. */
+  productsPath: z.string().default('products'),
+  /**
+   * Map RawExtractedProduct fields to dot-paths in each product object.
+   * Value may be a fallback list (first non-empty wins).
+   */
+  fieldMap: z.record(z.union([z.string(), z.array(z.string())])),
+  /** Prefix relative product URLs (e.g. https://www.sportchek.ca). */
+  urlPrefix: z.string().url().optional(),
+  currency: CurrencySchema.default('CAD'),
+});
+
+export type ApiRecipe = z.infer<typeof ApiRecipeSchema>;
 
 export const CrawlRecipeSchema = z.object({
   version: z.literal(1).default(1),
@@ -25,6 +74,8 @@ export const CrawlRecipeSchema = z.object({
   agentFileUrl: z.string().url().nullable().default(null),
   notes: z.array(z.string()).default([]),
   confidence: z.number().min(0).max(1).default(0),
+  /** Present when discoveryMode is `api`. */
+  api: ApiRecipeSchema.nullable().optional().default(null),
 });
 
 export type CrawlRecipe = z.infer<typeof CrawlRecipeSchema>;

@@ -1,11 +1,9 @@
 import { type RetailerAdapter } from './types';
-import { sportchekAdapter } from './sportchek';
 import { mecAdapter } from './mec';
 import { sportingLifeAdapter } from './sportinglife';
 import { decathlonAdapter } from './decathlon';
 
 const adapters: Record<string, RetailerAdapter> = {
-  [sportchekAdapter.key]: sportchekAdapter,
   [mecAdapter.key]: mecAdapter,
   [sportingLifeAdapter.key]: sportingLifeAdapter,
   [decathlonAdapter.key]: decathlonAdapter,
@@ -26,4 +24,5 @@ export function listAdapters(): RetailerAdapter[] {
 
 export * from './types';
 export * from './generic';
+export * from './recipe-adapter';
 export * from './sportchek-api';

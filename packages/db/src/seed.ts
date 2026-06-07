@@ -1,6 +1,8 @@
 import './load-env.js';
+import { SPORTCHEK_CRAWL_RECIPE } from '@retailer/schema';
 import { db, queryClient } from './client';
 import { retailers } from './schema';
+import { eq } from 'drizzle-orm';
 
 /**
  * Seed the three independent Canadian sporting-goods retailers.
@@ -60,6 +62,13 @@ async function main() {
     console.log(`  ✓ ${r.name}`);
   }
   await queryClient.end();
+  await db
+    .update(retailers)
+    .set({ crawlRecipe: SPORTCHEK_CRAWL_RECIPE })
+    .where(eq(retailers.key, 'sportchek'));
+  // eslint-disable-next-line no-console
+  console.log('  ✓ Sport Chek API crawl recipe');
+
   // eslint-disable-next-line no-console
   console.log('[db] seed complete');
 }

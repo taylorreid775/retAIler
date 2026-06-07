@@ -3,14 +3,14 @@ import { createLogger } from '@retailer/core';
 import { db, schema, eq } from '@retailer/db';
 import {
   createGenericAdapter,
+  createRecipeAdapter,
   getAdapter,
   isAllowed,
   registerAdapter,
-  SPORTCHEK_API_HEADERS,
   type RetailerAdapter,
 } from '@retailer/crawler';
 import { ingestExtractedProduct } from '@retailer/pipeline';
-import { QueueName, type DiscoverJob } from '@retailer/schema';
+import { CrawlRecipeSchema, QueueName, type DiscoverJob } from '@retailer/schema';
 import { getRetailer, type RetailerRow } from '../retailers.js';
 import { fetcherFor } from '../fetchers.js';
 import { BrowserFetcher } from '../browser-fetcher.js';
@@ -20,12 +20,25 @@ import { SCHEDULED_RUN_SENTINEL } from '../scheduler.js';
 const log = createLogger('worker:discover');
 
 /**
- * Resolve the adapter for a retailer. Seeded retailers ship a hand-written
- * adapter; self-serve (user-onboarded) retailers have none, so we build a
- * generic sitemap adapter from their auto-discovered crawl config and register
- * it once — no worker redeploy required.
+ * Resolve the adapter for a retailer. Prefer a saved crawl recipe (API or
+ * sitemap); fall back to hand-written seeded adapters, then generic sitemap
+ * config from DB columns.
  */
 function resolveAdapter(retailer: RetailerRow): RetailerAdapter | undefined {
+  const parsed = retailer.crawlRecipe
+    ? CrawlRecipeSchema.safeParse(retailer.crawlRecipe)
+    : null;
+  if (parsed?.success && parsed.data.discoveryMode === 'api' && parsed.data.api) {
+    const adapter = createRecipeAdapter({
+      key: retailer.key,
+      name: retailer.name,
+      domain: retailer.domain,
+      recipe: parsed.data,
+    });
+    log.info('using API crawl recipe', { retailerKey: retailer.key });
+    return adapter;
+  }
+
   const existing = getAdapter(retailer.key);
   if (existing) return existing;
 
@@ -102,21 +115,24 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
         log,
       });
 
-      const fetchJson = async (url: string): Promise<unknown | null> => {
-        if (retailerKey === 'sportchek' && browserFetcher) {
-          const res = await browserFetcher.fetchJson(url, SPORTCHEK_API_HEADERS);
+      const fetchJson = async (
+        url: string,
+        headers: Record<string, string> = {},
+      ): Promise<unknown | null> => {
+        if (browserFetcher) {
+          const res = await browserFetcher.fetchJson(url, headers);
           if (res.status < 200 || res.status >= 300) {
-            log.warn('sportchek API fetch failed', { url, status: res.status });
+            log.warn('API JSON fetch failed', { url, status: res.status });
             return null;
           }
           try {
             return JSON.parse(res.text) as unknown;
           } catch {
-            log.warn('sportchek API returned non-JSON', { url });
+            log.warn('API returned non-JSON', { url });
             return null;
           }
         }
-        const res = await fetch(url, { headers: SPORTCHEK_API_HEADERS });
+        const res = await fetch(url, { headers });
         if (!res.ok) return null;
         return res.json() as Promise<unknown>;
       };

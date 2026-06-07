@@ -124,6 +124,7 @@ export async function discoverSite(
       if (href) linkRelSitemaps.push(absolute(href, origin));
     });
     homepageLinks.push(...sameHostAnchors($, origin, host));
+    homepageLinks.push(...scrapeProductPathUrls(homepageHtml, origin, host));
   } else {
     notes.push('homepage fetch returned no HTML');
   }
@@ -166,7 +167,9 @@ export async function discoverSite(
   // ── fallback: shallow BFS from the homepage when no sitemap works ──
   if (corpus.length === 0) {
     notes.push('no usable sitemap; falling back to homepage link crawl');
-    const links = await shallowCrawl(origin, host, ua, opts.fetchText, homepageLinks, corpusLimit);
+    const localeSeeds = host.endsWith('.ca') ? [`${origin}/en-CA`, `${origin}/fr-CA`] : [];
+    const crawlSeeds = dedupe([origin, ...localeSeeds, ...homepageLinks]);
+    const links = await shallowCrawl(origin, host, ua, opts.fetchText, crawlSeeds, corpusLimit);
     for (const u of links) corpus.push({ url: u, sitemap: '' });
   }
 
@@ -200,7 +203,10 @@ export async function discoverSite(
   // and content checks found nothing, accept strong URL-path evidence from
   // product-named sitemaps (e.g. /en/ip/... from sitemap-product-*.xml).
   if (confirmed.length === 0 && opts.fetchText) {
-    const evidence = confirmFromSitemapUrlEvidence(corpus, sampleLimit);
+    let evidence = confirmFromSitemapUrlEvidence(corpus, sampleLimit);
+    if (evidence.length < 3) {
+      evidence = confirmFromPathEvidence(corpus, sampleLimit);
+    }
     if (evidence.length >= 3) {
       for (const url of evidence) {
         confirmed.push(url);
@@ -342,8 +348,30 @@ async function shallowCrawl(
       found.add(link);
       if (found.size >= limit) break;
     }
+    for (const link of scrapeProductPathUrls(html, origin, host)) {
+      found.add(link);
+      if (found.size >= limit) break;
+    }
   }
   return [...found];
+}
+
+/**
+ * Extract product-detail URLs embedded in JS bundles or JSON (e.g. Sports
+ * Experts `/en-CA/p-{slug}/{id}/{variant}`) when anchors are not present.
+ */
+function scrapeProductPathUrls(html: string, origin: string, host: string): string[] {
+  const out = new Set<string>();
+  const re = /\/(?:[a-z]{2}-[A-Z]{2}\/)?p-[a-z0-9][\w-]*(?:\/\d+)+/gi;
+  for (const match of html.matchAll(re)) {
+    try {
+      const abs = new URL(match[0], origin);
+      if (abs.host === host) out.add(abs.toString());
+    } catch {
+      // ignore
+    }
+  }
+  return [...out];
 }
 
 function sameHostAnchors($: cheerio.CheerioAPI, origin: string, host: string): string[] {
@@ -573,7 +601,7 @@ async function urlExists(url: string, ua: string): Promise<boolean> {
  * hint — non-product sitemaps are still sampled, just later.
  */
 /** Product-detail path tokens seen across major retailers. */
-const PRODUCT_PATH_RE = /\/(ip|products?|p|item|sku)\//i;
+const PRODUCT_PATH_RE = /\/(?:p-|p\/|products?\/|ip\/|item\/|sku\/)/i;
 
 /**
  * When PDP HTML cannot be fetched (bot wall), accept URLs from product sitemaps
@@ -591,6 +619,16 @@ function confirmFromSitemapUrlEvidence(
       )
       .map((e) => e.url),
   );
+  if (urls.length < 3) return [];
+  return spread(urls, Math.min(limit, 10));
+}
+
+/** Path-only evidence when PDP HTML is blocked but corpus has product-like URLs. */
+function confirmFromPathEvidence(
+  corpus: { url: string; sitemap: string }[],
+  limit: number,
+): string[] {
+  const urls = dedupe(corpus.filter((e) => PRODUCT_PATH_RE.test(e.url)).map((e) => e.url));
   if (urls.length < 3) return [];
   return spread(urls, Math.min(limit, 10));
 }

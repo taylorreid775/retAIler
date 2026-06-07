@@ -6,3 +6,4 @@ export * from './jobs';
 export * from './signals';
 export * from './tenant';
 export * from './crawl-recipe';
+export * from './recipes/sportchek-crawl-recipe';
