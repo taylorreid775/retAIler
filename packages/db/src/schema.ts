@@ -103,8 +103,10 @@ export const retailers = pgTable(
     sitemapUrl: text('sitemap_url'),
     /** Discovered product-detail URL pattern (substring or regex source). */
     productUrlPattern: text('product_url_pattern'),
-    /** Discovered llms.txt URL, if any (metadata only). */
+    /** Discovered llms.txt URL, if any. */
     llmsTxtUrl: text('llms_txt_url'),
+    /** Persisted crawl + extraction recipe (from llms.txt + discovery). */
+    crawlRecipe: jsonb('crawl_recipe').$type<import('@retailer/schema').CrawlRecipe>(),
     /** Human-readable summary of what discovery found / could not find. */
     discoveryNotes: text('discovery_notes'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -14,6 +14,7 @@ import { QueueName, type DiscoverJob } from '@retailer/schema';
 import { getRetailer, type RetailerRow } from '../retailers.js';
 import { fetcherFor } from '../fetchers.js';
 import { BrowserFetcher } from '../browser-fetcher.js';
+import { createDiscoverFetchText } from '../discover-fetch.js';
 import { SCHEDULED_RUN_SENTINEL } from '../scheduler.js';
 
 const log = createLogger('worker:discover');
@@ -94,18 +95,12 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
       }
 
       let discovered = 0;
-      const staticFetcher = fetcherFor('static');
       const browserFetcher =
         retailer.fetchStrategy === 'browser' ? (fetcherFor('browser') as BrowserFetcher) : null;
-      const fetchText = async (url: string) => {
-        const staticRes = await staticFetcher.fetch(url);
-        if (staticRes.status >= 200 && staticRes.status < 300) return staticRes.html;
-        if (browserFetcher) {
-          const browserRes = await browserFetcher.fetch(url);
-          return browserRes.status >= 200 && browserRes.status < 300 ? browserRes.html : null;
-        }
-        return null;
-      };
+      const fetchText = createDiscoverFetchText({
+        fetchStrategy: retailer.fetchStrategy,
+        log,
+      });
 
       const fetchJson = async (url: string): Promise<unknown | null> => {
         if (retailerKey === 'sportchek' && browserFetcher) {

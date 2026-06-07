@@ -1,6 +1,8 @@
 import * as cheerio from 'cheerio';
 import robotsParser from 'robots-parser';
 import { createLogger } from '@retailer/core';
+import type { CrawlRecipe } from '@retailer/schema';
+import { AGENT_FILE_CANDIDATES, buildCrawlRecipe, fetchAgentManifest } from './agent-manifest';
 import { getSitemapChildren, walkSitemap } from './sitemap';
 import { extractFromJsonLd } from './extract/structured';
 
@@ -24,16 +26,6 @@ const PRODUCT_PATH_PRIORS = [
   'pdp',
   'sku',
   'p',
-];
-
-/** Best-effort agent / LLM manifest filenames to probe (metadata only). */
-const AGENT_FILE_CANDIDATES = [
-  'llms.txt',
-  'llms-full.txt',
-  'ai.txt',
-  '.well-known/llms.txt',
-  '.well-known/ai.txt',
-  '.well-known/ai-plugin.json',
 ];
 
 /** Fallback sitemap filenames, tried only when nothing authoritative is found. */
@@ -67,6 +59,8 @@ export interface SiteDiscovery {
   crawlDelayMs: number | null;
   llmsTxtUrl: string | null;
   agentFiles: string[];
+  /** Persisted crawl + extraction recipe for future scrapes. */
+  crawlRecipe: CrawlRecipe;
   /** Human-readable summary of what was / was not found. */
   notes: string;
 }
@@ -110,6 +104,15 @@ export async function discoverSite(
   const robotsSitemaps = robotsText ? parseRobotsSitemaps(robotsText) : [];
   if (robotsSitemaps.length) notes.push(`robots.txt listed ${robotsSitemaps.length} sitemap(s)`);
 
+  // ── agent manifest (llms.txt): authoritative sitemap + product hints ──
+  const agentManifest = await fetchAgentManifest(origin, (u) => fetchText(u, ua));
+  if (agentManifest) {
+    notes.push(`parsed agent manifest at ${agentManifest.agentFileUrl}`);
+    if (agentManifest.sitemapUrls.length) {
+      notes.push(`agent manifest listed ${agentManifest.sitemapUrls.length} sitemap(s)`);
+    }
+  }
+
   // ── homepage: <link rel="sitemap"> + same-host nav links ──
   const homepageHtml = await fetchHtml(origin, ua, opts.fetchText);
   const homepageLinks: string[] = [];
@@ -131,6 +134,7 @@ export async function discoverSite(
   // at the first. Product-looking names are tried first to confirm quickly.
   const sitemapCandidates = prioritizeProductSitemaps(
     dedupe([
+      ...(agentManifest?.sitemapUrls ?? []),
       ...robotsSitemaps,
       ...linkRelSitemaps,
       ...SITEMAP_NAME_CANDIDATES.map((n) => `${origin}/${n}`),
@@ -211,7 +215,8 @@ export async function discoverSite(
   }
 
   const confidence = sample.length ? confirmed.length / sample.length : 0;
-  const productUrlPattern = deriveProductPattern(confirmed);
+  const productUrlPattern =
+    deriveProductPattern(confirmed) ?? agentManifest?.productUrlPatterns[0] ?? null;
 
   // Sitemaps that produced a confirmed product are what the crawl should walk.
   const sitemapUrls = [...productSitemaps];
@@ -228,14 +233,21 @@ export async function discoverSite(
     );
   }
 
-  // ── best-effort agent / LLM files (metadata only) ──
-  const agentFiles: string[] = [];
-  for (const name of AGENT_FILE_CANDIDATES) {
-    const fileUrl = `${origin}/${name}`;
-    if (await urlExists(fileUrl, ua)) agentFiles.push(fileUrl);
-  }
-  const llmsTxtUrl = agentFiles.find((f) => /llms\.txt$/i.test(f)) ?? null;
-  if (agentFiles.length) notes.push(`found agent file(s): ${agentFiles.join(', ')}`);
+  const agentFiles = await listAgentFiles(origin, ua);
+  const llmsTxtUrl =
+    agentManifest?.agentFileUrl ??
+    agentFiles.find((f) => /llms(-full)?\.txt$/i.test(f)) ??
+    null;
+
+  const crawlRecipe = buildCrawlRecipe({
+    agent: agentManifest,
+    robotsSitemapCount: robotsSitemaps.length,
+    sitemapUrls,
+    productUrlPattern,
+    sampleProductUrls: confirmed.slice(0, 5),
+    fetchStrategy,
+    confidence,
+  });
 
   return {
     key: slugifyHost(host),
@@ -251,8 +263,18 @@ export async function discoverSite(
     crawlDelayMs,
     llmsTxtUrl,
     agentFiles,
+    crawlRecipe,
     notes: notes.join('; '),
   };
+}
+
+async function listAgentFiles(origin: string, ua: string): Promise<string[]> {
+  const agentFiles: string[] = [];
+  for (const name of AGENT_FILE_CANDIDATES) {
+    const fileUrl = `${origin}/${name}`;
+    if (await urlExists(fileUrl, ua)) agentFiles.push(fileUrl);
+  }
+  return agentFiles;
 }
 
 // ─── URL corpus helpers ───────────────────────────────────────────────────

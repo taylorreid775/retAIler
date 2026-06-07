@@ -7,6 +7,7 @@ import { QueueName, type FetchJob } from '@retailer/schema';
 import { getRetailer } from '../retailers.js';
 import { fetcherFor } from '../fetchers.js';
 import { storeLocalSnapshot } from '../local-snapshots.js';
+import { tryFinalizeCrawlRun } from '../crawl-run.js';
 
 const log = createLogger('worker:fetch');
 
@@ -17,7 +18,7 @@ const log = createLogger('worker:fetch');
 export function startFetchWorker(): Worker<FetchJob> {
   const limiters = new Map<string, RateLimiter>();
 
-  return new Worker<FetchJob>(
+  const worker = new Worker<FetchJob>(
     QueueName.Fetch,
     async (job: Job<FetchJob>) => {
       const { retailerKey, url, crawlRunId } = job.data;
@@ -83,4 +84,15 @@ export function startFetchWorker(): Worker<FetchJob> {
       concurrency: serverEnv().CRAWLER_MAX_CONCURRENCY,
     },
   );
+
+  worker.on('failed', async (job) => {
+    const crawlRunId = job?.data.crawlRunId;
+    if (!crawlRunId) return;
+    const maxAttempts = job.opts.attempts ?? 3;
+    if (job.attemptsMade >= maxAttempts) {
+      await tryFinalizeCrawlRun(crawlRunId);
+    }
+  });
+
+  return worker;
 }

@@ -14,10 +14,9 @@ export interface MatchCandidate {
   distance: number;
 }
 
-/** Confidence thresholds for the matcher's decision tiers. */
-const AUTO_MATCH_DISTANCE = 0.12; // very close embeddings → auto-match
-const REVIEW_DISTANCE = 0.28; // borderline → LLM adjudication / review
-const LLM_CONFIRM_THRESHOLD = 0.82;
+/** Max embedding distance before we skip candidate search entirely. */
+const REVIEW_DISTANCE = 0.28;
+const LLM_CONFIRM_THRESHOLD = 0.85;
 
 const AdjudicationSchema = z.object({
   same: z.boolean(),
@@ -92,9 +91,35 @@ export async function hardKeyMatch(
   return null;
 }
 
-/** LLM adjudication for borderline candidates. */
+/** Same retailer already has a different SKU on this canonical product → not a match. */
+async function sameRetailerSkuConflict(
+  retailerId: string,
+  retailerProductId: string,
+  retailerSku: string | null,
+  candidateProductId: string,
+): Promise<boolean> {
+  const rows = await db
+    .select({
+      id: schema.retailerProducts.id,
+      sku: schema.retailerProducts.retailerSku,
+    })
+    .from(schema.retailerProducts)
+    .where(
+      and(
+        eq(schema.retailerProducts.retailerId, retailerId),
+        eq(schema.retailerProducts.productId, candidateProductId),
+        eq(schema.retailerProducts.active, true),
+      ),
+    );
+  const others = rows.filter((r) => r.id !== retailerProductId);
+  if (!others.length) return false;
+  if (!retailerSku) return true;
+  return others.some((r) => r.sku && r.sku !== retailerSku);
+}
+
+/** LLM adjudication — required for all embedding-based matches. */
 async function adjudicate(
-  current: { title: string; brand: string | null },
+  current: { title: string; brand: string | null; category: string },
   candidate: { title: string },
 ): Promise<z.infer<typeof AdjudicationSchema>> {
   try {
@@ -102,10 +127,12 @@ async function adjudicate(
       model: extractionModel(),
       schema: AdjudicationSchema,
       system:
-        'Decide whether two retail product listings refer to the SAME product ' +
-        '(same model, ignoring size/color variants and retailer wording). ' +
-        'Return confidence in [0,1].',
-      prompt: `A: ${current.brand ?? ''} ${current.title}\nB: ${candidate.title}`,
+        'Decide whether two retail product listings refer to the EXACT SAME product model. ' +
+        'Same model means same garment/equipment type (e.g. tank top vs sports bra = DIFFERENT). ' +
+        'Ignore size and colour variants of the same model. Return confidence in [0,1].',
+      prompt:
+        `A: ${current.brand ?? ''} | ${current.category} | ${current.title}\n` +
+        `B: ${candidate.title}`,
     });
     return object;
   } catch (err) {
@@ -126,6 +153,10 @@ export type MatchDecision =
 export async function decideMatch(params: {
   title: string;
   brand: string | null;
+  categoryPath: string[];
+  retailerId: string;
+  retailerProductId: string;
+  retailerSku: string | null;
   gtin: string | null;
   mpn: string | null;
   candidates: MatchCandidate[];
@@ -136,13 +167,23 @@ export async function decideMatch(params: {
   const best = params.candidates[0];
   if (!best) return { kind: 'new', confidence: 1 };
 
-  if (best.distance <= AUTO_MATCH_DISTANCE) {
-    return { kind: 'matched', productId: best.productId, confidence: 1 - best.distance, status: 'auto_matched' };
-  }
-
   if (best.distance <= REVIEW_DISTANCE) {
+    const conflict = await sameRetailerSkuConflict(
+      params.retailerId,
+      params.retailerProductId,
+      params.retailerSku,
+      best.productId,
+    );
+    if (conflict) {
+      return {
+        kind: 'new',
+        confidence: 1 - best.distance,
+      };
+    }
+
+    const category = params.categoryPath.filter(Boolean).slice(-2).join(' > ');
     const verdict = await adjudicate(
-      { title: params.title, brand: params.brand },
+      { title: params.title, brand: params.brand, category },
       { title: best.title },
     );
     if (verdict.same && verdict.confidence >= LLM_CONFIRM_THRESHOLD) {

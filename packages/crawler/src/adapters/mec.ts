@@ -63,10 +63,10 @@ export const mecAdapter: RetailerAdapter = {
     const listPrice =
       listRaw != null && price != null && listRaw > price ? listRaw : null;
 
+    const img = product.images?.[0];
     const imageUrl =
-      product.images?.[0]?.url ??
-      product.images?.[0]?.src ??
-      product.images?.[0]?.imageUrl ??
+      pickImageUrl(img) ??
+      ogImage(html) ??
       null;
 
     return {
@@ -111,8 +111,32 @@ interface MecPageProps {
     shortDescription?: string;
     availabilityStatus?: string;
     breadcrumbs?: Array<{ name?: string; label?: string }>;
-    images?: Array<{ url?: string; src?: string; imageUrl?: string }>;
+    images?: MecImage[];
   };
+}
+
+interface MecImage {
+  url?: string;
+  urlOriginal?: string;
+  url_standard?: string;
+  url_zoom?: string;
+  src?: string;
+  imageUrl?: string;
+}
+
+/** MEC/BigCommerce images often leave `url` empty; CDN URLs live on urlOriginal. */
+function pickImageUrl(img: MecImage | undefined): string | null {
+  if (!img) return null;
+  const candidates = [img.urlOriginal, img.url_zoom, img.url_standard, img.url, img.src, img.imageUrl];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.length > 0 && c.startsWith('http')) return c;
+  }
+  return null;
+}
+
+function ogImage(html: string): string | null {
+  const m = html.match(/property="og:image" content="([^"]+)"/i);
+  return m?.[1]?.startsWith('http') ? m[1] : null;
 }
 
 function mapAvailability(status?: string): RawExtractedProduct['availability'] {

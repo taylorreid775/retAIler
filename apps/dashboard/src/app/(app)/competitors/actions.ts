@@ -64,6 +64,7 @@ export interface AddStoreResult {
     fetchStrategy: 'static' | 'browser';
     confidence: number;
     sampleProductUrls: string[];
+    crawlRecipe?: unknown;
     notes: string;
   };
 }
@@ -261,6 +262,7 @@ async function promoteDiscoveredStore(
         .join('\n'),
       productUrlPattern: discovery.productUrlPattern,
       llmsTxtUrl: discovery.llmsTxtUrl,
+      crawlRecipe: discovery.crawlRecipe,
       discoveryNotes: discovery.notes,
     })
     .returning();
@@ -311,6 +313,7 @@ function toDiscoveryView(d: Awaited<ReturnType<typeof discoverSite>>): AddStoreR
     fetchStrategy: d.fetchStrategy,
     confidence: d.confidence,
     sampleProductUrls: d.sampleProductUrls,
+    crawlRecipe: d.crawlRecipe,
     notes: d.notes,
   };
 }

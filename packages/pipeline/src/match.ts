@@ -29,6 +29,7 @@ export async function matchRetailerProduct(retailerProductId: string): Promise<M
   const text = embeddingText({
     rawTitle: rp.rawTitle,
     brandRaw: rp.brandRaw,
+    categoryPath: rp.categoryPathRaw,
     attributes: rp.attributes,
   });
   const embedding = await upsertEmbedding(retailerProductId, text);
@@ -37,6 +38,10 @@ export async function matchRetailerProduct(retailerProductId: string): Promise<M
   const decision = await decideMatch({
     title: rp.rawTitle,
     brand: rp.brandRaw,
+    categoryPath: rp.categoryPathRaw,
+    retailerId: rp.retailerId,
+    retailerProductId,
+    retailerSku: rp.retailerSku,
     gtin: rp.gtin,
     mpn: rp.mpn,
     candidates,
@@ -44,7 +49,13 @@ export async function matchRetailerProduct(retailerProductId: string): Promise<M
 
   if (decision.kind === 'matched') {
     await linkToProduct(retailerProductId, decision.productId, decision.status, decision.confidence);
-    await backfillProduct(decision.productId, { brandId, categoryId, gtin: rp.gtin, mpn: rp.mpn });
+    await backfillProduct(decision.productId, {
+      brandId,
+      categoryId,
+      gtin: rp.gtin,
+      mpn: rp.mpn,
+      imageUrl: rp.imageUrl,
+    });
     log.debug('matched', { retailerProductId, productId: decision.productId, status: decision.status });
     return { retailerProductId, productId: decision.productId, status: decision.status };
   }
@@ -98,7 +109,13 @@ async function linkToProduct(
 /** Fill in canonical product fields that were previously unknown. */
 async function backfillProduct(
   productId: string,
-  fields: { brandId: string | null; categoryId: string | null; gtin: string | null; mpn: string | null },
+  fields: {
+    brandId: string | null;
+    categoryId: string | null;
+    gtin: string | null;
+    mpn: string | null;
+    imageUrl: string | null;
+  },
 ): Promise<void> {
   const [p] = await db
     .select()
@@ -112,6 +129,7 @@ async function backfillProduct(
       categoryId: p.categoryId ?? fields.categoryId,
       gtin: p.gtin ?? fields.gtin,
       mpn: p.mpn ?? fields.mpn,
+      imageUrl: p.imageUrl ?? fields.imageUrl,
       updatedAt: new Date(),
     })
     .where(eq(schema.products.id, productId));

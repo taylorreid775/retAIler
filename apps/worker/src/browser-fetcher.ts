@@ -1,6 +1,9 @@
-import { chromium, type Browser, type BrowserContext } from 'playwright';
-import { serverEnv } from '@retailer/core';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import { nextProxy, type Fetcher, type FetchResult } from '@retailer/crawler';
+
+/** Realistic Chrome UA — required to pass Cloudflare on retailers like MEC. */
+const BROWSER_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 /**
  * Playwright-backed fetcher for JS-rendered retailers. Reuses one browser +
@@ -20,7 +23,7 @@ export class BrowserFetcher implements Fetcher {
       args: ['--disable-blink-features=AutomationControlled'],
     });
     this.context = await this.browser.newContext({
-      userAgent: serverEnv().CRAWLER_USER_AGENT,
+      userAgent: BROWSER_UA,
       locale: 'en-CA',
       ...(proxy ? { proxy: { server: proxy } } : {}),
     });
@@ -38,7 +41,7 @@ export class BrowserFetcher implements Fetcher {
     const context = await this.ensure();
     const page = await context.newPage();
     try {
-      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
       const status = response?.status() ?? 0;
       const contentType = response?.headers()['content-type'] ?? '';
       const raw = response ? await response.text() : '';
@@ -49,8 +52,13 @@ export class BrowserFetcher implements Fetcher {
         return { url, status, html: raw, finalUrl: page.url() };
       }
 
-      // PDPs: wait for client hydration, then snapshot the rendered DOM.
-      await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+      await waitPastCloudflare(page);
+      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
+      if (url.includes('/product/')) {
+        await page
+          .waitForFunction(() => document.getElementById('__NEXT_DATA__') != null, { timeout: 20_000 })
+          .catch(() => {});
+      }
       const html = await page.content();
       return { url, status, html, finalUrl: page.url() };
     } finally {
@@ -63,6 +71,15 @@ export class BrowserFetcher implements Fetcher {
     await this.browser?.close();
     this.context = null;
     this.browser = null;
+  }
+}
+
+/** Poll until Cloudflare interstitial clears (MEC, etc.). */
+async function waitPastCloudflare(page: Page): Promise<void> {
+  for (let i = 0; i < 12; i++) {
+    const title = await page.title();
+    if (!title.includes('Just a moment')) return;
+    await page.waitForTimeout(5_000);
   }
 }
 

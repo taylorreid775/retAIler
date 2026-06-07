@@ -1,0 +1,39 @@
+# Fly.io config for the RetAIler crawl worker (Playwright + BullMQ).
+# Deploy: fly launch --no-deploy (first time) then fly deploy from apps/worker.
+#
+# Required secrets (fly secrets set):
+#   DATABASE_URL, REDIS_URL, AI_GATEWAY_API_KEY
+# Optional:
+#   BLOB_READ_WRITE_TOKEN, CRAWLER_USER_AGENT, HEALTH_PORT=8080
+
+app = "retailer-worker"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+  context = "../.."
+
+[env]
+  NODE_ENV = "production"
+  HEALTH_PORT = "8080"
+  REGISTER_SCHEDULES = "true"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    timeout = "5s"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2

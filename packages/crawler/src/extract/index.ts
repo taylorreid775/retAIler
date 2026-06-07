@@ -1,7 +1,8 @@
-import { RawExtractedProductSchema, type RawExtractedProduct } from '@retailer/schema';
+import { RawExtractedProductSchema, type CrawlRecipe, type RawExtractedProduct } from '@retailer/schema';
 import { createLogger } from '@retailer/core';
 import { extractFromJsonLd } from './structured';
 import { extractWithLlm } from './llm';
+import { extractFromRecipe } from './recipe';
 
 const log = createLogger('crawler:extract');
 
@@ -10,6 +11,8 @@ export interface ExtractOptions {
   allowLlm?: boolean;
   /** Adapter-specific structured parser tried before JSON-LD. */
   custom?: (html: string, url: string, retailerKey: string) => RawExtractedProduct | null;
+  /** Persisted per-retailer crawl recipe (from onboarding). */
+  recipe?: CrawlRecipe | null;
 }
 
 /**
@@ -22,12 +25,16 @@ export async function extractProduct(
   retailerKey: string,
   opts: ExtractOptions = {},
 ): Promise<RawExtractedProduct | null> {
-  const { allowLlm = true, custom } = opts;
+  const { allowLlm = true, custom, recipe } = opts;
 
   let result = custom?.(html, url, retailerKey) ?? null;
   if (!result || !hasPrice(result)) {
     const jsonLd = extractFromJsonLd(html, url, retailerKey);
     result = mergePreferred(result, jsonLd);
+  }
+  if (recipe && (!result || !hasPrice(result) || !result.imageUrl)) {
+    const fromRecipe = extractFromRecipe(html, url, retailerKey, recipe);
+    result = mergePreferred(result, fromRecipe);
   }
   if ((!result || !hasPrice(result)) && allowLlm) {
     const llm = await extractWithLlm(html, url, retailerKey);
@@ -72,3 +79,4 @@ function stripNulls(p: RawExtractedProduct): Partial<RawExtractedProduct> {
 
 export { extractFromJsonLd } from './structured';
 export { extractWithLlm } from './llm';
+export { extractFromRecipe } from './recipe';

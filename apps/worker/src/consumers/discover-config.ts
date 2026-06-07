@@ -3,8 +3,7 @@ import { createLogger } from '@retailer/core';
 import { db, schema, eq, or, count } from '@retailer/db';
 import { discoverSite, type SiteDiscovery } from '@retailer/crawler';
 import { QueueName, PLAN_LIMITS, type DiscoverConfigJob } from '@retailer/schema';
-import { fetcherFor } from '../fetchers.js';
-import type { BrowserFetcher } from '../browser-fetcher.js';
+import { createDiscoverFetchText } from '../discover-fetch.js';
 
 const log = createLogger('worker:discover-config');
 
@@ -20,6 +19,7 @@ function toDiscoveryView(d: SiteDiscovery) {
     fetchStrategy: d.fetchStrategy,
     confidence: d.confidence,
     sampleProductUrls: d.sampleProductUrls,
+    crawlRecipe: d.crawlRecipe,
     notes: d.notes,
   };
 }
@@ -65,44 +65,9 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
 
       const inputUrl = onboarding.inputUrl;
 
-      // Browser-capable fetchText for HTML pages only (homepage nav, PDP
-      // confirmation). Sitemap collection in discoverSite always uses static
-      // HTTP regardless of this override.
-      const staticFetcher = fetcherFor('static');
-      const browserFetcher = fetcherFor('browser') as BrowserFetcher;
-      const fetchText = async (url: string): Promise<string | null> => {
-        // Sitemaps / robots are XML or plain text — static HTTP only.
-        if (isSitemapLikeUrl(url)) {
-          try {
-            const staticRes = await staticFetcher.fetch(url);
-            return staticRes.status >= 200 && staticRes.status < 300 ? staticRes.html : null;
-          } catch {
-            return null;
-          }
-        }
-
-        // HTML pages (PDPs, homepage): bot walls often return HTTP 200 with a
-        // challenge page, so don't treat every 2xx static response as success.
-        try {
-          const staticRes = await staticFetcher.fetch(url);
-          if (
-            staticRes.status >= 200 &&
-            staticRes.status < 300 &&
-            !looksLikeBotWall(staticRes.html, staticRes.finalUrl)
-          ) {
-            return staticRes.html;
-          }
-        } catch (err) {
-          log.warn('static fetch failed, trying browser', { url, err: String(err) });
-        }
-        try {
-          const browserRes = await browserFetcher.fetch(url);
-          return browserRes.status >= 200 && browserRes.status < 300 ? browserRes.html : null;
-        } catch (err) {
-          log.warn('browser fetch failed', { url, err: String(err) });
-          return null;
-        }
-      };
+      // Onboarding always uses browser fallback — new stores are often behind
+      // Cloudflare/Akamai before we know their fetchStrategy.
+      const fetchText = createDiscoverFetchText({ fetchStrategy: 'browser', log });
 
       let discovery: SiteDiscovery;
       try {
@@ -181,6 +146,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
               .join('\n'),
             productUrlPattern: discovery.productUrlPattern,
             llmsTxtUrl: discovery.llmsTxtUrl,
+            crawlRecipe: discovery.crawlRecipe,
             discoveryNotes: discovery.notes,
           })
           .returning({ id: schema.retailers.id });
@@ -221,19 +187,3 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
   );
 }
 
-function isSitemapLikeUrl(url: string): boolean {
-  return /\.(xml|gz)(\?|$)|\/robots\.txt$/i.test(url);
-}
-
-/** Walmart-class sites return 200 with a challenge page instead of a 403. */
-function looksLikeBotWall(html: string, finalUrl?: string): boolean {
-  if (finalUrl && /\/blocked(\?|$)/i.test(finalUrl)) return true;
-  const head = html.slice(0, 4000).toLowerCase();
-  return (
-    head.includes('verify your identity') ||
-    head.includes('captcha') ||
-    head.includes('px-captcha') ||
-    head.includes('access denied') ||
-    head.includes('robot or human')
-  );
-}

@@ -9,6 +9,7 @@
     "dev:stable": "tsx src/index.ts",
     "start": "tsx src/index.ts",
     "enqueue": "tsx src/enqueue.ts",
+    "purge-queues": "tsx src/purge-queues.ts",
     "kill": "pkill -9 -f 'RetAIler/apps/worker.*tsx' 2>/dev/null; pkill -9 -f 'RetAIler/apps/worker.*nodemon' 2>/dev/null; pkill -9 -f '@retailer/worker dev' 2>/dev/null; echo 'Worker processes stopped'",
     "lint": "echo \"(worker) no lint configured\"",
     "typecheck": "tsc --noEmit",
