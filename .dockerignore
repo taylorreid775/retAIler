@@ -1,0 +1,21 @@
+# Keep worker image build context small (fly.toml context = repo root).
+.git
+.gitignore
+**/.turbo
+**/.next
+**/dist
+**/node_modules
+**/.env
+**/.env.*
+!.env.example
+apps/dashboard/**
+apps/web/**
+**/agent-tools
+**/.cursor
+**/.git
+docs
+.agents
+.cursor
+terminals
+*.md
+!apps/worker/**/*.md
