@@ -53,7 +53,7 @@ export const CrawlRecipeSchema = z.object({
   version: z.literal(1).default(1),
   /** Which signals contributed to this recipe. */
   sources: z
-    .array(z.enum(['llms_txt', 'robots_txt', 'discovery', 'platform']))
+    .array(z.enum(['llms_txt', 'robots_txt', 'discovery', 'platform', 'network_sniff']))
     .default([]),
   discoveryMode: z.enum(['sitemap', 'listing_pages', 'api']).default('sitemap'),
   sitemapUrls: z.array(z.string().url()).default([]),

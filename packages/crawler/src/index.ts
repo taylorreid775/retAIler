@@ -9,3 +9,7 @@ export * from './snapshot';
 export * from './extract/index';
 export * from './adapters/index';
 export * from './discover/api-recipe';
+export * from './discover/network-types';
+export * from './discover/score-json-response';
+export * from './discover/infer-api-recipe';
+export * from './discover/validate-api-recipe';

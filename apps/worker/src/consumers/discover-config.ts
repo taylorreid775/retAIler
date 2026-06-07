@@ -1,9 +1,18 @@
 import { Worker, type Job, queues, redisConnection } from '@retailer/jobs';
 import { createLogger } from '@retailer/core';
 import { db, schema, eq, or, count } from '@retailer/db';
-import { discoverSite, type SiteDiscovery } from '@retailer/crawler';
+import {
+  discoverSite,
+  inferApiRecipeFromCaptures,
+  mergeApiIntoDiscovery,
+  validateApiRecipe,
+  type SiteDiscovery,
+} from '@retailer/crawler';
 import { QueueName, PLAN_LIMITS, type DiscoverConfigJob } from '@retailer/schema';
 import { createDiscoverFetchText } from '../discover-fetch.js';
+import { fetcherFor } from '../fetchers.js';
+import { BrowserFetcher } from '../browser-fetcher.js';
+import { captureNetworkJson } from '../network-capture.js';
 
 const log = createLogger('worker:discover-config');
 
@@ -78,9 +87,18 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         return;
       }
 
-      const view = toDiscoveryView(discovery);
+      // Sniff XHR/fetch only when HTML/sitemap discovery failed — saves time + AI credits.
+      const needsApiSniff = discovery.confidence <= 0 || !discovery.productUrlPattern;
 
-      if (!discovery.productUrlPattern || discovery.confidence <= 0) {
+      if (needsApiSniff) {
+        discovery = await tryNetworkApiDiscovery(inputUrl, discovery);
+      }
+
+      const view = toDiscoveryView(discovery);
+      const hasApiRecipe =
+        discovery.crawlRecipe.discoveryMode === 'api' && discovery.crawlRecipe.api != null;
+
+      if ((!discovery.productUrlPattern || discovery.confidence <= 0) && !hasApiRecipe) {
         log.warn('no products confirmed', { onboardingId, inputUrl, notes: discovery.notes });
         await markFailed(
           onboardingId,
@@ -184,6 +202,69 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       });
     },
     { connection: redisConnection(), concurrency: 1 },
+  );
+}
+
+/** Phase B: sniff XHR/fetch traffic, infer + validate an API crawl recipe. */
+async function tryNetworkApiDiscovery(
+  inputUrl: string,
+  discovery: SiteDiscovery,
+): Promise<SiteDiscovery> {
+  log.info('network API sniff starting', { inputUrl, key: discovery.key });
+
+  const captures = await captureNetworkJson(inputUrl);
+  if (!captures.length) {
+    log.info('network API sniff found no product-like JSON', { inputUrl });
+    return discovery;
+  }
+
+  const inferred = await inferApiRecipeFromCaptures(captures, {
+    domain: discovery.domain,
+    homepageUrl: discovery.homepageUrl,
+  });
+  if (!inferred) {
+    log.warn('network API sniff could not infer recipe', { inputUrl, captures: captures.length });
+    return discovery;
+  }
+
+  const browserFetcher = fetcherFor('browser') as BrowserFetcher;
+  const fetchJson = async (url: string, headers: Record<string, string> = {}) => {
+    const res = await browserFetcher.fetchJson(url, headers);
+    if (res.status < 200 || res.status >= 300) return null;
+    try {
+      return JSON.parse(res.text) as unknown;
+    } catch {
+      return null;
+    }
+  };
+
+  const draft = mergeApiIntoDiscovery(
+    discovery,
+    inferred.api,
+    inferred.productUrlPattern,
+    discovery.sampleProductUrls,
+  );
+
+  const validation = await validateApiRecipe(draft.crawlRecipe, discovery.key, fetchJson, 3);
+  if (!validation.ok) {
+    log.warn('inferred API recipe failed validation', {
+      key: discovery.key,
+      samples: validation.count,
+    });
+    return discovery;
+  }
+
+  log.info('network API recipe validated', {
+    key: discovery.key,
+    products: validation.count,
+    endpoint: inferred.api.baseUrl,
+  });
+
+  return mergeApiIntoDiscovery(
+    discovery,
+    inferred.api,
+    inferred.productUrlPattern,
+    validation.samples.map((s) => s.sourceUrl),
   );
 }
 
