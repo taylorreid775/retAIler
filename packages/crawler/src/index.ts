@@ -15,6 +15,7 @@ export * from './discover/network-types';
 export * from './discover/score-json-response';
 export * from './discover/infer-api-recipe';
 export * from './discover/validate-api-recipe';
+export * from './discover/orchestrator';
 export * from './jina/fetcher';
 export * from './discover/category-directory';
 export * from './discover/listing-md';

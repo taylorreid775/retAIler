@@ -15,6 +15,7 @@ import {
   runPlatformPack,
   mergePlatformPackIntoDiscovery,
   crawlRecipePlatformFromFingerprint,
+  runParallelDiscoveryStages,
   type SiteDiscovery,
   type CategoryDirectoryResult,
 } from '@retailer/crawler';
@@ -89,29 +90,46 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       // Cloudflare/Akamai before we know their fetchStrategy.
       const fetchText = createDiscoverFetchText({ fetchStrategy: 'browser', log });
 
+      const useOrchestrator = process.env.DISCOVERY_ORCHESTRATOR === '1';
+
       let discovery: SiteDiscovery;
+      let fingerprint: RetailerFingerprint;
+      let platformPackUsed = false;
+      let apiValidationReport: ApiRecipeValidation['report'] | null = null;
+
       try {
-        discovery = await discoverSite(inputUrl, { fetchText });
+        if (useOrchestrator) {
+          const orch = await runParallelDiscoveryStages(inputUrl, fetchText, {
+            tryPlatformPack: tryPlatformPackDiscovery,
+          });
+          discovery = orch.discovery;
+          fingerprint = orch.fingerprint;
+          platformPackUsed = orch.platformPackUsed;
+          apiValidationReport = orch.apiValidationReport;
+          log.info('orchestrator parallel discovery', {
+            onboardingId,
+            selected: platformPackUsed ? 'platform_pack' : 'static_site',
+            notes: orch.notes,
+          });
+        } else {
+          discovery = await discoverSite(inputUrl, { fetchText });
+          fingerprint = fingerprintSite({
+            domain: discovery.domain,
+            homepageUrl: discovery.homepageUrl,
+            homepageHtml: discovery.homepageHtml,
+            agentUrls: discovery.crawlRecipe.sampleProductUrls,
+          });
+          const platformPackResult = await tryPlatformPackDiscovery(discovery, fingerprint);
+          discovery = platformPackResult.discovery;
+          platformPackUsed = platformPackResult.used;
+          if (platformPackResult.validationReport) {
+            apiValidationReport = platformPackResult.validationReport;
+          }
+        }
       } catch (err) {
         log.error('discovery threw', { onboardingId, inputUrl, err: String(err) });
         await markFailed(onboardingId, `Could not analyze that site: ${String(err)}`);
         return;
-      }
-
-      const fingerprint = fingerprintSite({
-        domain: discovery.domain,
-        homepageUrl: discovery.homepageUrl,
-        homepageHtml: discovery.homepageHtml,
-        agentUrls: discovery.crawlRecipe.sampleProductUrls,
-      });
-
-      let platformPackUsed = false;
-      let apiValidationReport: ApiRecipeValidation['report'] | null = null;
-      const platformPackResult = await tryPlatformPackDiscovery(discovery, fingerprint);
-      discovery = platformPackResult.discovery;
-      platformPackUsed = platformPackResult.used;
-      if (platformPackResult.validationReport) {
-        apiValidationReport = platformPackResult.validationReport;
       }
 
       let jinaResult: CategoryDirectoryResult | null = null;
