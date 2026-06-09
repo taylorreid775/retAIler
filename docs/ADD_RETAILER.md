@@ -1,5 +1,8 @@
 # Onboarding a new retailer
 
+> **Architecture reference:** See [docs/discovery/](./discovery/README.md) for the full
+> discovery system design, implementation order, and agent instructions.
+
 Three paths, in order of preference.
 
 ## 0. Self-serve — add a store by URL (no code, no ops)

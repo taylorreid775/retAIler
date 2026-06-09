@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 /** How a retailer's pages should be fetched. */
-export const FetchStrategySchema = z.enum(['static', 'browser']);
+export const FetchStrategySchema = z.enum(['static', 'browser', 'jina_reader']);
 export type FetchStrategy = z.infer<typeof FetchStrategySchema>;
 
 /** Per-retailer crawl policy. Keep polite-by-default. */

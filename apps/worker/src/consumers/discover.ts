@@ -3,9 +3,11 @@ import { createLogger } from '@retailer/core';
 import { db, schema, eq } from '@retailer/db';
 import {
   createGenericAdapter,
+  createJinaAdapter,
   createRecipeAdapter,
   getAdapter,
   isAllowed,
+  loadListingPages,
   registerAdapter,
   type RetailerAdapter,
 } from '@retailer/crawler';
@@ -24,10 +26,30 @@ const log = createLogger('worker:discover');
  * sitemap); fall back to hand-written seeded adapters, then generic sitemap
  * config from DB columns.
  */
-function resolveAdapter(retailer: RetailerRow): RetailerAdapter | undefined {
+async function resolveAdapter(retailer: RetailerRow): Promise<RetailerAdapter | undefined> {
   const parsed = retailer.crawlRecipe
     ? CrawlRecipeSchema.safeParse(retailer.crawlRecipe)
     : null;
+  if (parsed?.success && parsed.data.discoveryMode === 'jina_categories') {
+    const listingPages = await loadListingPages(retailer.id);
+    if (listingPages.length > 0) {
+      const adapter = createJinaAdapter({
+        key: retailer.key,
+        name: retailer.name,
+        domain: retailer.domain,
+        recipe: parsed.data,
+        listingPages,
+        retailerId: retailer.id,
+      });
+      registerAdapter(adapter);
+      log.info('using Jina category crawl adapter', {
+        retailerKey: retailer.key,
+        listingPages: listingPages.length,
+      });
+      return adapter;
+    }
+    log.warn('jina_categories mode but no listing pages saved', { retailerKey: retailer.key });
+  }
   if (parsed?.success && parsed.data.discoveryMode === 'api' && parsed.data.api) {
     const adapter = createRecipeAdapter({
       key: retailer.key,
@@ -80,7 +102,7 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
       const { retailerKey, categoryFilter } = job.data;
       const retailer = await getRetailer(retailerKey);
       if (!retailer) throw new Error(`unknown retailer ${retailerKey}`);
-      const adapter = resolveAdapter(retailer);
+      const adapter = await resolveAdapter(retailer);
       if (!adapter) {
         throw new Error(
           `no adapter for ${retailerKey} (missing sitemapUrl/productUrlPattern for generic crawl)`,

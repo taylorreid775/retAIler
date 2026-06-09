@@ -59,6 +59,14 @@ Sport Chek, MEC, and Sporting Life. Canadian Tire (and its Atmosphere banner)
 are intentionally excluded because Canadian Tire owns Sport Chek — they don't
 truly compete.
 
+## Documentation
+
+| Doc | Description |
+| --- | --- |
+| [docs/discovery/](./docs/discovery/README.md) | Retailer discovery architecture (agent reference) |
+| [docs/ADD_RETAILER.md](./docs/ADD_RETAILER.md) | Onboarding paths for new retailers |
+| [docs/COMPLIANCE.md](./docs/COMPLIANCE.md) | Crawl compliance checklist |
+
 ## Compliance note
 
 Crawling respects `robots.txt` by default, throttles per-retailer, identifies a

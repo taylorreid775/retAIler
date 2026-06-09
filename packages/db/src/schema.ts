@@ -34,7 +34,7 @@ const vector = customType<{ data: number[]; driverData: string }>({
 });
 
 // ─── Enums ──────────────────────────────────────────────────────────────
-export const fetchStrategyEnum = pgEnum('fetch_strategy', ['static', 'browser']);
+export const fetchStrategyEnum = pgEnum('fetch_strategy', ['static', 'browser', 'jina_reader']);
 /** How a retailer entered the platform: built-in seed vs. self-serve URL onboarding. */
 export const retailerSourceEnum = pgEnum('retailer_source', ['seed', 'user']);
 /** Lifecycle of a self-serve store onboarding (URL → browser discovery → retailer). */
@@ -109,11 +109,67 @@ export const retailers = pgTable(
     crawlRecipe: jsonb('crawl_recipe').$type<import('@retailer/schema').CrawlRecipe>(),
     /** Human-readable summary of what discovery found / could not find. */
     discoveryNotes: text('discovery_notes'),
+    /** Latest retailer fingerprint from discovery. */
+    fingerprint: jsonb('fingerprint').$type<import('@retailer/schema').RetailerFingerprint>(),
+    discoveryConfidence: real('discovery_confidence').default(0),
+    lastRediscoveryAt: timestamp('last_rediscovery_at', { withTimezone: true }),
+    crawlHealthScore: real('crawl_health_score').default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     keyIdx: uniqueIndex('retailers_key_idx').on(t.key),
+  }),
+);
+
+/** Category/collection listing URLs discovered via Jina + AI (one row per URL). */
+export const retailerListingPages = pgTable(
+  'retailer_listing_pages',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    url: text('url').notNull(),
+    label: text('label').notNull(),
+    parentId: uuid('parent_id'),
+    pagination: jsonb('pagination').$type<import('@retailer/schema').ListingPagination>(),
+    productUrlPattern: text('product_url_pattern'),
+    discoveredAt: timestamp('discovered_at', { withTimezone: true }).notNull().defaultNow(),
+    lastCrawledAt: timestamp('last_crawled_at', { withTimezone: true }),
+    active: boolean('active').notNull().default(true),
+  },
+  (t) => ({
+    urlIdx: uniqueIndex('retailer_listing_pages_url_idx').on(t.retailerId, t.url),
+    retailerIdx: index('retailer_listing_pages_retailer_idx').on(t.retailerId),
+  }),
+);
+
+/** Immutable crawl recipe history for rollback and audit. */
+export const retailerRecipeVersions = pgTable(
+  'retailer_recipe_versions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    crawlRecipe: jsonb('crawl_recipe')
+      .$type<import('@retailer/schema').CrawlRecipe>()
+      .notNull(),
+    fingerprint: jsonb('fingerprint').$type<import('@retailer/schema').RetailerFingerprint>(),
+    validationReport: jsonb('validation_report'),
+    confidence: real('confidence').notNull(),
+    primaryEndpoint: text('primary_endpoint').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    createdBy: text('created_by').notNull(),
+  },
+  (t) => ({
+    retailerVersionIdx: uniqueIndex('retailer_recipe_versions_retailer_id_version_unique').on(
+      t.retailerId,
+      t.version,
+    ),
+    retailerIdx: index('retailer_recipe_versions_retailer_id_idx').on(t.retailerId),
   }),
 );
 

@@ -5,7 +5,7 @@ import { BrowserFetcher } from './browser-fetcher.js';
 let staticFetcher: Fetcher | null = null;
 let browserFetcher: BrowserFetcher | null = null;
 
-export function fetcherFor(strategy: 'static' | 'browser'): Fetcher {
+export function fetcherFor(strategy: 'static' | 'browser' | 'jina_reader'): Fetcher {
   if (strategy === 'browser') {
     browserFetcher ??= new BrowserFetcher();
     return browserFetcher;

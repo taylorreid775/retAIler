@@ -1,4 +1,5 @@
 import type { CrawlRecipe } from '@retailer/schema';
+import { detectLegacyPlatform } from './fingerprint/signals.js';
 
 /** Filenames to try, most informative first. */
 export const AGENT_FILE_CANDIDATES = [
@@ -73,7 +74,7 @@ export function parseAgentManifest(text: string, origin: string, fileUrl: string
       .map((u) => pathPatternFromUrl(u)),
   ).filter(Boolean) as string[];
 
-  const platform = detectPlatform(lower, urls);
+  const platform = detectLegacyPlatform(lower, urls);
   if (platform !== 'unknown') notes.push(`platform: ${platform}`);
 
   const extractionStrategy: CrawlRecipe['extractionStrategy'] =
@@ -171,6 +172,7 @@ export function buildCrawlRecipe(params: {
     notes,
     confidence,
     api: null,
+    jina: null,
   };
 }
 
@@ -188,21 +190,6 @@ function defaultExtractionHints(platform: CrawlRecipe['platform']): CrawlRecipe[
     };
   }
   return { imageJsonPaths: [], priceJsonPaths: [] };
-}
-
-function detectPlatform(lower: string, urls: string[]): CrawlRecipe['platform'] {
-  if (lower.includes('bigcommerce') || urls.some((u) => u.includes('bigcommerce.com'))) return 'bigcommerce';
-  if (lower.includes('shopify') || urls.some((u) => u.includes('myshopify.com') || u.includes('cdn.shopify.com')))
-    return 'shopify';
-  if (
-    lower.includes('salesforce') ||
-    lower.includes('demandware') ||
-    lower.includes('canadian tire') ||
-    /\/pdp\//.test(lower)
-  )
-    return 'salesforce';
-  if (lower.includes('magento') || urls.some((u) => u.includes('/media/catalog/product/'))) return 'unknown';
-  return 'unknown';
 }
 
 function extractUrls(text: string, origin: string): string[] {
@@ -254,13 +241,21 @@ function pathPatternFromUrl(url: string): string | null {
   try {
     const u = new URL(url);
     const path = u.pathname.toLowerCase();
-    if (/\/pdp\//.test(path)) return '/pdp/';
+    if (/\/cat\//.test(path)) return '/cat/';
+    if (/\/pdp\//.test(path) && path.split('/').filter(Boolean).length > 3) return '/pdp/';
+    if (/\/pdp\//.test(path)) return null;
     if (/\/p-[^/]+/.test(path)) return '/p-/';
     const parts = u.pathname.split('/').filter(Boolean);
     if (parts.length < 2) return null;
     const anchor = parts.slice(0, 2).join('/');
-    // Reject full product slugs mistaken for patterns (Mark's llms.txt samples).
-    if (anchor.length > 32 && !PRODUCT_PATH_TOKENS.some((t) => anchor.includes(`/${t}/`))) {
+    // Reject full product slugs mistaken for patterns (llms.txt / Mark's samples).
+    if (
+      anchor.length > 24 ||
+      /\d{5,}/.test(anchor) ||
+      !PRODUCT_PATH_TOKENS.some((t) => anchor.includes(`${t}/`) || anchor.endsWith(`/${t}`) || parts.some((p) => p === t))
+    ) {
+      const tokenIdx = parts.findIndex((p) => PRODUCT_PATH_TOKENS.includes(p));
+      if (tokenIdx >= 0) return `/${parts[tokenIdx]}/`;
       return null;
     }
     return `/${anchor}/`;

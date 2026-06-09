@@ -1,15 +1,23 @@
 import { Worker, type Job, queues, redisConnection } from '@retailer/jobs';
 import { createLogger } from '@retailer/core';
-import { db, schema, eq, or, count } from '@retailer/db';
+import { db, schema, eq, or, count, writeRecipeVersion } from '@retailer/db';
 import {
   discoverSite,
   deriveProductPattern,
+  discoverCategoryDirectory,
+  mergeJinaIntoCrawlRecipe,
   inferApiRecipeFromCaptures,
   mergeApiIntoDiscovery,
+  saveListingPages,
   validateApiRecipe,
+  fingerprintSite,
+  runPlatformPack,
+  mergePlatformPackIntoDiscovery,
+  crawlRecipePlatformFromFingerprint,
   type SiteDiscovery,
+  type CategoryDirectoryResult,
 } from '@retailer/crawler';
-import { QueueName, PLAN_LIMITS, type DiscoverConfigJob } from '@retailer/schema';
+import { QueueName, PLAN_LIMITS, type DiscoverConfigJob, type RetailerFingerprint } from '@retailer/schema';
 import { createDiscoverFetchText } from '../discover-fetch.js';
 import { fetcherFor } from '../fetchers.js';
 import { BrowserFetcher } from '../browser-fetcher.js';
@@ -88,8 +96,62 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         return;
       }
 
+      const fingerprint = fingerprintSite({
+        domain: discovery.domain,
+        homepageUrl: discovery.homepageUrl,
+        homepageHtml: discovery.homepageHtml,
+        agentUrls: discovery.crawlRecipe.sampleProductUrls,
+      });
+
+      let platformPackUsed = false;
+      const platformPackResult = await tryPlatformPackDiscovery(discovery, fingerprint);
+      discovery = platformPackResult.discovery;
+      platformPackUsed = platformPackResult.used;
+
+      let jinaResult: CategoryDirectoryResult | null = null;
+      if (!platformPackUsed) {
+        try {
+          jinaResult = await discoverCategoryDirectory({
+            homepageUrl: discovery.homepageUrl,
+            domain: discovery.domain,
+          });
+        if (
+          jinaResult &&
+          jinaResult.directory.confidence >= 0.3 &&
+          jinaResult.directory.categories.length > 0
+        ) {
+          discovery = {
+            ...discovery,
+            productUrlPattern: jinaResult.directory.productUrlPattern,
+            fetchStrategy: 'jina_reader',
+            confidence: Math.max(discovery.confidence, jinaResult.directory.confidence),
+            crawlRecipe: mergeJinaIntoCrawlRecipe(discovery.crawlRecipe, jinaResult.directory),
+            notes: jinaResult.directory.notes
+              ? `${discovery.notes}; jina: ${jinaResult.directory.notes}`
+              : `${discovery.notes}; jina category discovery (${jinaResult.directory.categories.length} categories)`,
+          };
+          log.info('Jina category discovery succeeded', {
+            onboardingId,
+            categories: jinaResult.directory.categories.length,
+            confidence: jinaResult.directory.confidence,
+          });
+        } else {
+          log.info('Jina category discovery skipped or low confidence', {
+            onboardingId,
+            confidence: jinaResult?.directory.confidence,
+            categories: jinaResult?.directory.categories.length ?? 0,
+          });
+          jinaResult = null;
+        }
+        } catch (err) {
+          log.warn('Jina category discovery failed', { onboardingId, err: String(err) });
+          jinaResult = null;
+        }
+      }
+
       // Sniff XHR/fetch only when HTML/sitemap discovery failed — saves time + AI credits.
-      const needsApiSniff = discovery.confidence <= 0 || !discovery.productUrlPattern;
+      const needsApiSniff =
+        !platformPackUsed && !jinaResult && (discovery.confidence <= 0 || !discovery.productUrlPattern);
 
       if (needsApiSniff) {
         discovery = await tryNetworkApiDiscovery(inputUrl, discovery);
@@ -111,13 +173,22 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       const view = toDiscoveryView(discovery);
       const hasApiRecipe =
         discovery.crawlRecipe.discoveryMode === 'api' && discovery.crawlRecipe.api != null;
+      const hasJinaRecipe =
+        discovery.crawlRecipe.discoveryMode === 'jina_categories' &&
+        discovery.crawlRecipe.jina != null &&
+        (jinaResult?.directory.categories.length ?? 0) > 0;
       const minSamples = effectivePattern === '/products/' || effectivePattern === '/pdp/' ? 2 : 3;
       const hasPathEvidence =
         !!effectivePattern &&
         discovery.sampleProductUrls.length >= minSamples &&
         (discovery.confidence > 0 || discovery.notes.includes('path pattern'));
 
-      if (!hasApiRecipe && !hasPathEvidence && (!effectivePattern || discovery.confidence <= 0)) {
+      if (
+        !hasApiRecipe &&
+        !hasJinaRecipe &&
+        !hasPathEvidence &&
+        (!effectivePattern || discovery.confidence <= 0)
+      ) {
         log.warn('no products confirmed', { onboardingId, inputUrl, notes: discovery.notes });
         const shutdown = discovery.notes.includes('consolidated') || discovery.notes.includes('no longer');
         const botWall =
@@ -143,8 +214,30 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         );
 
       let retailerId: string;
+      const recipeChanged = hasJinaRecipe || hasApiRecipe || platformPackUsed;
       if (existing) {
         retailerId = existing.id;
+        if (recipeChanged) {
+          await db
+            .update(schema.retailers)
+            .set({
+              fetchStrategy: discovery.fetchStrategy,
+              productUrlPattern: discovery.productUrlPattern,
+              crawlRecipe: discovery.crawlRecipe,
+              discoveryNotes: discovery.notes,
+              fingerprint,
+              discoveryConfidence: discovery.confidence,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.retailers.id, retailerId));
+          await writeRecipeVersion({
+            retailerId,
+            crawlRecipe: discovery.crawlRecipe,
+            fingerprint,
+            confidence: discovery.confidence,
+            createdBy: 'discovery',
+          });
+        }
       } else {
         // Re-check the plan limit at promotion time — the org may have hit the
         // cap while this job was queued.
@@ -191,6 +284,8 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
             llmsTxtUrl: discovery.llmsTxtUrl,
             crawlRecipe: discovery.crawlRecipe,
             discoveryNotes: discovery.notes,
+            fingerprint,
+            discoveryConfidence: discovery.confidence,
           })
           .returning({ id: schema.retailers.id });
         if (!created) {
@@ -198,6 +293,21 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           return;
         }
         retailerId = created.id;
+        await writeRecipeVersion({
+          retailerId,
+          crawlRecipe: discovery.crawlRecipe,
+          fingerprint,
+          confidence: discovery.confidence,
+          createdBy: 'discovery',
+        });
+      }
+
+      if (jinaResult && hasJinaRecipe) {
+        await saveListingPages(retailerId, jinaResult.directory);
+        log.info('saved Jina listing pages', {
+          retailerId,
+          count: jinaResult.directory.categories.length,
+        });
       }
 
       await db
@@ -228,6 +338,76 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
     },
     { connection: redisConnection(), concurrency: 1 },
   );
+}
+
+/** Phase A: deterministic platform pack probes before Jina/network sniff. */
+async function tryPlatformPackDiscovery(
+  discovery: SiteDiscovery,
+  fingerprint: RetailerFingerprint,
+): Promise<{ discovery: SiteDiscovery; used: boolean }> {
+  if (fingerprint.platformConfidence < 0.5 || fingerprint.recommendedStrategy !== 'platform_pack') {
+    return { discovery, used: false };
+  }
+
+  const browserFetcher = fetcherFor('browser') as BrowserFetcher;
+  const fetchJson = async (url: string, headers: Record<string, string> = {}) => {
+    const res = await browserFetcher.fetchJson(url, headers);
+    if (res.status < 200 || res.status >= 300) return null;
+    try {
+      return JSON.parse(res.text) as unknown;
+    } catch {
+      return null;
+    }
+  };
+
+  const packResult = await runPlatformPack(fingerprint, {
+    origin: discovery.homepageUrl,
+    domain: discovery.domain,
+    homepageHtml: discovery.homepageHtml,
+    fetchJson,
+  });
+  if (!packResult) {
+    log.info('platform pack found no validated endpoint', { key: discovery.key, platform: fingerprint.platform });
+    return { discovery, used: false };
+  }
+
+  const sampleUrls: string[] = [];
+  const draft = mergePlatformPackIntoDiscovery(
+    discovery,
+    packResult.api,
+    packResult.productUrlPattern,
+    sampleUrls,
+    crawlRecipePlatformFromFingerprint(fingerprint),
+    packResult.probeUrl,
+  );
+
+  const validation = await validateApiRecipe(draft.crawlRecipe, discovery.key, fetchJson, 3);
+  if (!validation.ok) {
+    log.warn('platform pack recipe failed validation', {
+      key: discovery.key,
+      endpoint: packResult.api.baseUrl,
+      samples: validation.count,
+    });
+    return { discovery, used: false };
+  }
+
+  log.info('platform pack recipe validated', {
+    key: discovery.key,
+    products: validation.count,
+    endpoint: packResult.api.baseUrl,
+  });
+
+  return {
+    discovery: mergePlatformPackIntoDiscovery(
+      discovery,
+      packResult.api,
+      packResult.productUrlPattern,
+      validation.samples.map((s) => s.sourceUrl),
+      crawlRecipePlatformFromFingerprint(fingerprint),
+      packResult.probeUrl,
+    ),
+    used: true,
+  };
 }
 
 /** Phase B: sniff XHR/fetch traffic, infer + validate an API crawl recipe. */

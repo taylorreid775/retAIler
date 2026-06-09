@@ -15,6 +15,7 @@
     "db:push": "drizzle-kit push",
     "db:seed": "tsx src/seed.ts",
     "db:backfill-sportchek-recipe": "tsx src/backfill-sportchek-recipe.ts",
+    "db:backfill-recipe-versions": "tsx src/backfill-recipe-versions.ts",
     "lint": "echo \"(db) no lint configured\"",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"

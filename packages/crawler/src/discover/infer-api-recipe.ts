@@ -100,20 +100,22 @@ export async function inferApiRecipeFromCaptures(
   }
 }
 
+type ApiMergeDiscovery = {
+  confidence: number;
+  productUrlPattern: string | null;
+  sampleProductUrls: string[];
+  crawlRecipe: CrawlRecipe;
+  notes: string;
+  fetchStrategy: 'static' | 'browser' | 'jina_reader';
+};
+
 /** Merge an inferred API block into a site discovery result. */
-export function mergeApiIntoDiscovery(
-  discovery: {
-    confidence: number;
-    productUrlPattern: string | null;
-    sampleProductUrls: string[];
-    crawlRecipe: CrawlRecipe;
-    notes: string;
-    fetchStrategy: 'static' | 'browser';
-  },
+export function mergeApiIntoDiscovery<T extends ApiMergeDiscovery>(
+  discovery: T,
   api: ApiRecipe,
   productUrlPattern: string | null,
   sampleUrls: string[],
-): typeof discovery {
+): T {
   const pattern = productUrlPattern ?? discovery.productUrlPattern;
   const samples = sampleUrls.length ? sampleUrls : discovery.sampleProductUrls;
   const confidence = Math.max(discovery.confidence, samples.length >= 3 ? 0.85 : 0.6);

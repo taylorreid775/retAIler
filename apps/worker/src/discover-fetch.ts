@@ -34,7 +34,7 @@ function looksLikeXml(text: string): boolean {
  * retailer needs JS/Cloudflare bypass, or when a 2xx response is a bot wall.
  */
 export function createDiscoverFetchText(opts: {
-  fetchStrategy: 'static' | 'browser';
+  fetchStrategy: 'static' | 'browser' | 'jina_reader';
   log?: Logger;
 }): (url: string) => Promise<string | null> {
   const log = opts.log ?? defaultLog;

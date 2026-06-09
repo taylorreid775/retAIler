@@ -16,6 +16,7 @@ export const SPORTCHEK_CRAWL_RECIPE: CrawlRecipe = {
   agentFileUrl: null,
   notes: ['Sport Chek public search API at apim.sportchek.ca'],
   confidence: 1,
+  jina: null,
   api: {
     baseUrl: 'https://apim.sportchek.ca/v1/search/v2/search',
     method: 'GET',

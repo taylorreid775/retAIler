@@ -56,7 +56,7 @@ export interface SiteDiscovery {
   sampleProductUrls: string[];
   /** 0..1: share of sampled candidates confirmed as products. */
   confidence: number;
-  fetchStrategy: 'static' | 'browser';
+  fetchStrategy: 'static' | 'browser' | 'jina_reader';
   crawlDelayMs: number | null;
   llmsTxtUrl: string | null;
   agentFiles: string[];
@@ -64,6 +64,8 @@ export interface SiteDiscovery {
   crawlRecipe: CrawlRecipe;
   /** Human-readable summary of what was / was not found. */
   notes: string;
+  /** Homepage HTML used for fingerprinting (not persisted). */
+  homepageHtml: string | null;
 }
 
 export interface DiscoverSiteOptions {
@@ -106,7 +108,8 @@ export async function discoverSite(
   if (robotsSitemaps.length) notes.push(`robots.txt listed ${robotsSitemaps.length} sitemap(s)`);
 
   // ── agent manifest (llms.txt): authoritative sitemap + product hints ──
-  const agentManifest = await fetchAgentManifest(origin, (u) => fetchText(u, ua));
+  const fetchAgentFile = (u: string) => fetchAgentFileText(u, ua, opts.fetchText);
+  const agentManifest = await fetchAgentManifest(origin, fetchAgentFile);
   if (agentManifest) {
     notes.push(`parsed agent manifest at ${agentManifest.agentFileUrl}`);
     if (agentManifest.sitemapUrls.length) {
@@ -209,30 +212,45 @@ export async function discoverSite(
   // fetches with HTTP-200 challenge pages. When browser discovery was requested
   // and content checks found nothing, accept strong URL-path evidence from
   // product-named sitemaps (e.g. /en/ip/... from sitemap-product-*.xml).
-  if (confirmed.length === 0 && opts.fetchText) {
-    let evidence = confirmFromSitemapUrlEvidence(corpus, sampleLimit);
+  if (confirmed.length === 0) {
+    let evidence = pickBestProductUrls(corpus, sampleLimit);
     if (evidence.length < 3) {
-      evidence = confirmFromPathEvidence(corpus, sampleLimit);
-    }
-    if (evidence.length < 3) {
-      evidence = confirmFromHtmlProductEvidence(corpus, sampleLimit);
+      const htmlUrls = confirmFromHtmlProductEvidence(corpus, sampleLimit);
+      evidence = pickBestProductUrls(
+        htmlUrls.map((url) => ({ url, sitemap: '' })),
+        sampleLimit,
+      );
     }
     if (evidence.length >= 3) {
-      for (const url of evidence) {
+      const reachable = await resolveReachableSamples(evidence, ua);
+      const finalEvidence = reachable.length >= 3 ? reachable : evidence;
+      if (reachable.length < evidence.length) {
+        notes.push(
+          `dropped ${evidence.length - reachable.length} unreachable short product URL(s); using canonical paths`,
+        );
+      }
+      for (const url of finalEvidence) {
         confirmed.push(url);
         const entry = corpus.find((e) => e.url === url);
         if (entry?.sitemap) productSitemaps.add(entry.sitemap);
       }
-      confirmedViaBrowserOnly = true;
+      if (!staticConfirmed && opts.fetchText) confirmedViaBrowserOnly = true;
       notes.push(
-        `confirmed ${evidence.length} URL(s) via product-sitemap path pattern (content fetch blocked)`,
+        `confirmed ${finalEvidence.length} URL(s) via sitemap path evidence (content fetch blocked)`,
       );
     }
   }
 
-  const confidence = sample.length ? confirmed.length / sample.length : 0;
+  const confidence =
+    confirmed.length > 0
+      ? sample.length
+        ? confirmed.length / sample.length
+        : 1
+      : 0;
   const productUrlPattern =
-    deriveProductPattern(confirmed) ?? agentManifest?.productUrlPatterns[0] ?? null;
+    deriveProductPattern(confirmed) ??
+    (confirmed.length === 0 ? null : agentManifest?.productUrlPatterns[0]) ??
+    null;
 
   // Sitemaps that produced a confirmed product are what the crawl should walk.
   const sitemapUrls = [...productSitemaps];
@@ -249,7 +267,7 @@ export async function discoverSite(
     );
   }
 
-  const agentFiles = await listAgentFiles(origin, ua);
+  const agentFiles = await listAgentFiles(origin, fetchAgentFile);
   const llmsTxtUrl =
     agentManifest?.agentFileUrl ??
     agentFiles.find((f) => /llms(-full)?\.txt$/i.test(f)) ??
@@ -281,14 +299,19 @@ export async function discoverSite(
     agentFiles,
     crawlRecipe,
     notes: notes.join('; '),
+    homepageHtml,
   };
 }
 
-async function listAgentFiles(origin: string, ua: string): Promise<string[]> {
+async function listAgentFiles(
+  origin: string,
+  fetchAgentFile: (url: string) => Promise<string | null>,
+): Promise<string[]> {
   const agentFiles: string[] = [];
   for (const name of AGENT_FILE_CANDIDATES) {
     const fileUrl = `${origin}/${name}`;
-    if (await urlExists(fileUrl, ua)) agentFiles.push(fileUrl);
+    const text = await fetchAgentFile(fileUrl);
+    if (text && text.length >= 20) agentFiles.push(fileUrl);
   }
   return agentFiles;
 }
@@ -520,11 +543,25 @@ export function deriveProductPattern(confirmedUrls: string[]): string | null {
   const lcpSpecific = lcp.length >= 2 || (lcp.length === 1 && lcp[0]!.length >= 4);
   if (lcpSpecific) return `/${lcp.join('/')}/`;
 
-  // 2) Sports Experts / similar: segment starts with p- (e.g. /fr-CA/p-hikelite.../id/id).
+  // 2) Category-nested PDPs (Salesforce / Canadian Tire family: /en/cat/dept/.../slug.html).
+  const catCount = segArrays.filter((arr) => arr.includes('cat')).length;
+  if (catCount >= majority) {
+    const catPrefixes = segArrays
+      .filter((arr) => arr.includes('cat'))
+      .map((arr) => {
+        const idx = arr.indexOf('cat');
+        return arr.slice(idx, Math.min(idx + 2, arr.length - 1));
+      });
+    const catLcp = longestCommonPrefix(catPrefixes);
+    if (catLcp.length >= 1) return `/${catLcp.join('/')}/`;
+    return '/cat/';
+  }
+
+  // 3) Sports Experts / similar: segment starts with p- (e.g. /fr-CA/p-hikelite.../id/id).
   const pSlugCount = segArrays.filter((arr) => arr.some((s) => s.startsWith('p-'))).length;
   if (pSlugCount >= majority) return '/p-/';
 
-  // 3) Highest-frequency known product token present in a majority of URLs.
+  // 4) Highest-frequency known product token present in a majority of URLs.
   let best: string | null = null;
   let bestCount = -1;
   for (const prior of PRODUCT_PATH_PRIORS) {
@@ -536,10 +573,10 @@ export function deriveProductPattern(confirmedUrls: string[]): string | null {
   }
   if (best) return `/${best}/`;
 
-  // 4) Fall back to the (possibly short) common prefix if there was one.
+  // 5) Fall back to the (possibly short) common prefix if there was one.
   if (lcp.length > 0) return `/${lcp.join('/')}/`;
 
-  // 5) Any non-trivial segment shared by a majority of URLs.
+  // 6) Any non-trivial segment shared by a majority of URLs.
   for (const [seg, c] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
     if (c >= majority && seg.length >= 2) return `/${seg}/`;
   }
@@ -565,12 +602,31 @@ function longestCommonPrefix(segArrays: string[][]): string[] {
 
 // ─── Low-level fetch helpers ───────────────────────────────────────────────
 
-async function fetchText(url: string, ua: string): Promise<string | null> {
+/** Agent manifests (llms.txt) are often short — do not use the HTML length gate. */
+async function fetchAgentFileText(
+  url: string,
+  ua: string,
+  fetchTextOverride: ((url: string) => Promise<string | null>) | undefined,
+): Promise<string | null> {
+  const staticText = await fetchText(url, ua, 25_000);
+  if (staticText && staticText.length >= 20) return staticText;
+  if (fetchTextOverride) {
+    const rendered = await fetchTextOverride(url);
+    if (rendered && rendered.length >= 20) return rendered;
+  }
+  return staticText;
+}
+
+async function fetchText(
+  url: string,
+  ua: string,
+  timeoutMs = 15_000,
+): Promise<string | null> {
   try {
     const res = await fetch(url, {
       headers: { 'user-agent': ua, accept: 'text/html,application/xhtml+xml,text/plain,*/*' },
       redirect: 'follow',
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return null;
     return await res.text();
@@ -594,20 +650,6 @@ async function fetchHtml(
   return staticHtml;
 }
 
-async function urlExists(url: string, ua: string): Promise<boolean> {
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'user-agent': ua },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(10_000),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
 // ─── Misc utilities ────────────────────────────────────────────────────────
 
 /**
@@ -626,24 +668,89 @@ const DOMAIN_ALIASES: Record<string, string> = {
   'runningroom.com': 'https://ca.shop.runningroom.com',
 };
 
+/** Score product URL candidates — prefer category-nested canonical paths over short /pdp/ stubs. */
+export function rankProductCandidateUrl(url: string, sitemap = ''): number {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    const segs = path.split('/').filter(Boolean);
+    let score = Math.min(segs.length, 10);
+    if (segs.includes('cat') || /\/cat\//.test(path)) score += 50;
+    if (/\.html?$/.test(path)) score += 8;
+    if (/\/pdp\//.test(path) && segs.length <= 3) score -= 35;
+    if (sitemap && /product/i.test(sitemap)) score += 5;
+    return score;
+  } catch {
+    return -100;
+  }
+}
+
+function productSlugKey(url: string): string | null {
+  try {
+    const leaf = new URL(url).pathname.split('/').filter(Boolean).pop() ?? '';
+    const id = leaf.match(/(\d{6,}[a-z]?)(?:\.html?)?$/i);
+    if (id) return id[1]!.toLowerCase();
+    return leaf.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * When PDP HTML cannot be fetched (bot wall), accept URLs from product sitemaps
- * whose paths match known product-detail patterns.
+ * When PDP HTML cannot be fetched (bot wall), pick the best URL per product id
+ * from sitemap corpus — canonical /cat/... paths beat broken /pdp/ shortcuts.
  */
-function confirmFromSitemapUrlEvidence(
+function pickBestProductUrls(
   corpus: { url: string; sitemap: string }[],
   limit: number,
 ): string[] {
-  const urls = dedupe(
-    corpus
-      .filter(
-        (e) =>
-          PRODUCT_PATH_RE.test(e.url) && (!e.sitemap || /product/i.test(e.sitemap)),
-      )
-      .map((e) => e.url),
-  );
-  if (urls.length < 3) return [];
-  return spread(urls, Math.min(limit, 10));
+  const candidates = corpus.filter((e) => {
+    if (!PRODUCT_PATH_RE.test(e.url)) return false;
+    if (!e.sitemap || /product/i.test(e.sitemap)) return true;
+    // Index sitemaps (sitemap.xml) often embed product URLs alongside other types.
+    return /\/cat\//.test(e.url) || rankProductCandidateUrl(e.url, e.sitemap) >= 10;
+  });
+  const bestByKey = new Map<string, { url: string; score: number }>();
+  for (const e of candidates) {
+    const key = productSlugKey(e.url) ?? e.url;
+    const score = rankProductCandidateUrl(e.url, e.sitemap);
+    const prev = bestByKey.get(key);
+    if (!prev || score > prev.score) bestByKey.set(key, { url: e.url, score });
+  }
+  const ranked = [...bestByKey.values()]
+    .sort((a, b) => b.score - a.score)
+    .map((e) => e.url);
+  if (ranked.length < 3) return [];
+  return spread(ranked, Math.min(limit, 10));
+}
+
+async function resolveReachableSamples(urls: string[], ua: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const url of urls) {
+    if (await urlReturnsOk(url, ua)) out.push(url);
+  }
+  return out;
+}
+
+async function urlReturnsOk(url: string, ua: string): Promise<boolean> {
+  try {
+    let res = await fetch(url, {
+      method: 'HEAD',
+      headers: { 'user-agent': ua },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (res.status === 405 || res.status === 501) {
+      res = await fetch(url, {
+        method: 'GET',
+        headers: { 'user-agent': ua, Range: 'bytes=0-0' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(12_000),
+      });
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 const CATEGORY_HTML_TOKENS =
@@ -687,16 +794,6 @@ function detectSiteShutdown(html: string): string | null {
     return 'site appears closed or consolidated (store may no longer sell products online)';
   }
   return null;
-}
-
-/** Path-only evidence when PDP HTML is blocked but corpus has product-like URLs. */
-function confirmFromPathEvidence(
-  corpus: { url: string; sitemap: string }[],
-  limit: number,
-): string[] {
-  const urls = dedupe(corpus.filter((e) => PRODUCT_PATH_RE.test(e.url)).map((e) => e.url));
-  if (urls.length < 3) return [];
-  return spread(urls, Math.min(limit, 10));
 }
 
 /** Prefer product-bearing child sitemaps (e.g. sitemap_Product-en_CA-CAD.xml). */

@@ -226,6 +226,9 @@ importers:
       '@retailer/core':
         specifier: workspace:*
         version: link:../core
+      '@retailer/db':
+        specifier: workspace:*
+        version: link:../db
       '@retailer/schema':
         specifier: workspace:*
         version: link:../schema

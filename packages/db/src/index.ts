@@ -1,4 +1,5 @@
 export * from './client';
+export * from './recipe-versions';
 export * as schema from './schema';
 export { EMBEDDING_DIM } from './schema';
 // Curated re-export of the operators we actually use (avoids pulling the

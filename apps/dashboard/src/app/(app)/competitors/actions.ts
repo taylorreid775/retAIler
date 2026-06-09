@@ -1,8 +1,8 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { db, schema, eq, and, or, desc, inArray } from '@retailer/db';
-import { discoverSite } from '@retailer/crawler';
+import { db, schema, eq, and, or, desc, inArray, writeRecipeVersion } from '@retailer/db';
+import { discoverSite, fingerprintSite } from '@retailer/crawler';
 import { queues } from '@retailer/jobs';
 import { getTenant } from '@/lib/tenant';
 import { isDevCrawlNowEnabled } from '@/lib/dev-flags';
@@ -244,6 +244,12 @@ async function promoteDiscoveredStore(
   discovery: Awaited<ReturnType<typeof discoverSite>>,
 ): Promise<AddStoreResult> {
   const view = toDiscoveryView(discovery);
+  const fingerprint = fingerprintSite({
+    domain: discovery.domain,
+    homepageUrl: discovery.homepageUrl,
+    homepageHtml: discovery.homepageHtml,
+    agentUrls: discovery.crawlRecipe.sampleProductUrls,
+  });
 
   const [retailer] = await db
     .insert(schema.retailers)
@@ -265,6 +271,8 @@ async function promoteDiscoveredStore(
       llmsTxtUrl: discovery.llmsTxtUrl,
       crawlRecipe: discovery.crawlRecipe,
       discoveryNotes: discovery.notes,
+      fingerprint,
+      discoveryConfidence: discovery.confidence,
     })
     .returning();
   if (!retailer) {
@@ -273,6 +281,14 @@ async function promoteDiscoveredStore(
     revalidatePath('/');
     return { error: 'Failed to create the store record' };
   }
+
+  await writeRecipeVersion({
+    retailerId: retailer.id,
+    crawlRecipe: discovery.crawlRecipe,
+    fingerprint,
+    confidence: discovery.confidence,
+    createdBy: 'discovery',
+  });
 
   await db
     .insert(schema.orgCompetitors)

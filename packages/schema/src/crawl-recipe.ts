@@ -49,17 +49,41 @@ export const ApiRecipeSchema = z.object({
 
 export type ApiRecipe = z.infer<typeof ApiRecipeSchema>;
 
+/** Pagination for Jina listing-page crawls (discovered once per site). */
+export const ListingPaginationSchema = z.object({
+  style: z.enum(['query_param', 'path_segment', 'link_rel', 'none']).default('none'),
+  paramName: z.string().nullable().default(null),
+  pathTemplate: z.string().nullable().default(null),
+  startPage: z.number().int().positive().default(1),
+  maxPages: z.number().int().positive().default(50),
+});
+
+export type ListingPagination = z.infer<typeof ListingPaginationSchema>;
+
+/** Jina Reader crawl config persisted on the retailer crawl recipe. */
+export const JinaRecipeSchema = z.object({
+  productUrlPattern: z.string().nullable().default(null),
+  pagination: ListingPaginationSchema.default({}),
+  lastDiscoveredAt: z.coerce.date().nullable().default(null),
+});
+
+export type JinaRecipe = z.infer<typeof JinaRecipeSchema>;
+
 export const CrawlRecipeSchema = z.object({
   version: z.literal(1).default(1),
   /** Which signals contributed to this recipe. */
   sources: z
-    .array(z.enum(['llms_txt', 'robots_txt', 'discovery', 'platform', 'network_sniff']))
+    .array(
+      z.enum(['llms_txt', 'robots_txt', 'discovery', 'platform', 'network_sniff', 'jina_reader']),
+    )
     .default([]),
-  discoveryMode: z.enum(['sitemap', 'listing_pages', 'api']).default('sitemap'),
+  discoveryMode: z
+    .enum(['sitemap', 'listing_pages', 'api', 'jina_categories'])
+    .default('sitemap'),
   sitemapUrls: z.array(z.string().url()).default([]),
   productUrlPattern: z.string().nullable().default(null),
   listingUrlPattern: z.string().nullable().default(null),
-  fetchStrategy: z.enum(['static', 'browser']).nullable().default(null),
+  fetchStrategy: z.enum(['static', 'browser', 'jina_reader']).nullable().default(null),
   extractionStrategy: z
     .enum(['json_ld', 'next_data', 'og_meta', 'llm_fallback'])
     .default('json_ld'),
@@ -76,6 +100,8 @@ export const CrawlRecipeSchema = z.object({
   confidence: z.number().min(0).max(1).default(0),
   /** Present when discoveryMode is `api`. */
   api: ApiRecipeSchema.nullable().optional().default(null),
+  /** Present when discoveryMode is `jina_categories`. */
+  jina: JinaRecipeSchema.nullable().optional().default(null),
 });
 
 export type CrawlRecipe = z.infer<typeof CrawlRecipeSchema>;
