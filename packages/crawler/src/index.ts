@@ -21,3 +21,8 @@ export * from './discover/category-directory';
 export * from './discover/listing-md';
 export * from './discover/pagination';
 export * from './discover/listing-pages-db';
+export * from './discover/health';
+export * from './discover/repair/index';
+export * from './discover/knowledge/writer';
+export * from './discover/knowledge/reader';
+export * from './discover/knowledge/db';

@@ -2,8 +2,10 @@ import { Queue } from 'bullmq';
 import {
   QueueName,
   type AnalyticsJob,
+  type CrawlHealthJob,
   type DiscoverConfigJob,
   type DiscoverJob,
+  type DiscoverRepairJob,
   type ExtractJob,
   type FetchJob,
   type MatchJob,
@@ -19,6 +21,8 @@ type JobMap = {
   [QueueName.Match]: MatchJob;
   [QueueName.Analytics]: AnalyticsJob;
   [QueueName.Reports]: ReportJob;
+  [QueueName.CrawlHealth]: CrawlHealthJob;
+  [QueueName.DiscoverRepair]: DiscoverRepairJob;
 };
 
 const defaultJobOptions = {
@@ -50,6 +54,8 @@ export const queues = {
   match: () => getQueue(QueueName.Match),
   analytics: () => getQueue(QueueName.Analytics),
   reports: () => getQueue(QueueName.Reports),
+  crawlHealth: () => getQueue(QueueName.CrawlHealth),
+  discoverRepair: () => getQueue(QueueName.DiscoverRepair),
 };
 
 export type { JobMap };

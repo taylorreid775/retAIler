@@ -1,6 +1,7 @@
 import { queues } from '@retailer/jobs';
 import { createLogger } from '@retailer/core';
 import { db, schema, eq, and } from '@retailer/db';
+import { enqueueCrawlHealth } from './crawl-health-enqueue.js';
 
 const log = createLogger('worker:crawl-run');
 
@@ -38,4 +39,5 @@ export async function tryFinalizeCrawlRun(crawlRunId: string): Promise<void> {
     .where(and(eq(schema.crawlRuns.id, crawlRunId), eq(schema.crawlRuns.status, 'running')));
 
   log.info('crawl run completed', { crawlRunId });
+  await enqueueCrawlHealth(crawlRunId);
 }

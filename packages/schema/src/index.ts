@@ -7,4 +7,5 @@ export * from './signals';
 export * from './tenant';
 export * from './crawl-recipe';
 export * from './fingerprint';
+export * from './health';
 export * from './recipes/sportchek-crawl-recipe';

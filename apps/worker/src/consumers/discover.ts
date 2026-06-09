@@ -19,6 +19,7 @@ import { BrowserFetcher } from '../browser-fetcher.js';
 import { createDiscoverFetchText } from '../discover-fetch.js';
 import { createApiFetchJson } from '../api-fetch.js';
 import { SCHEDULED_RUN_SENTINEL } from '../scheduler.js';
+import { enqueueCrawlHealth } from '../crawl-health-enqueue.js';
 
 const log = createLogger('worker:discover');
 
@@ -176,6 +177,7 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
           })
           .where(eq(schema.crawlRuns.id, crawlRunId));
         log.info('API discovery complete', { retailerKey, discovered });
+        await enqueueCrawlHealth(crawlRunId);
         return;
       }
 
@@ -195,6 +197,7 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
         .where(eq(schema.crawlRuns.id, crawlRunId));
       if (discovered === 0) {
         log.warn('discovery found no URLs — sitemap may be blocked or empty', { retailerKey });
+        await enqueueCrawlHealth(crawlRunId);
       }
       log.info('discovery complete', { retailerKey, discovered });
     },
@@ -220,6 +223,7 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
       crawlRunId,
       err: String(err),
     });
+    await enqueueCrawlHealth(crawlRunId);
   });
 
   return worker;

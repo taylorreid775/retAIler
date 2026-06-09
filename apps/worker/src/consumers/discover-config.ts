@@ -1,6 +1,6 @@
 import { Worker, type Job, queues, redisConnection } from '@retailer/jobs';
 import { createLogger } from '@retailer/core';
-import { db, schema, eq, or, count, writeRecipeVersion } from '@retailer/db';
+import { db, schema, eq, or, count, writeRecipeVersion, desc } from '@retailer/db';
 import {
   discoverSite,
   deriveProductPattern,
@@ -16,6 +16,7 @@ import {
   mergePlatformPackIntoDiscovery,
   crawlRecipePlatformFromFingerprint,
   runParallelDiscoveryStages,
+  writeKnowledgeDocs,
   type SiteDiscovery,
   type CategoryDirectoryResult,
 } from '@retailer/crawler';
@@ -242,11 +243,12 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         );
 
       let retailerId: string;
+      let recipeVersion = 1;
       const recipeChanged = hasJinaRecipe || hasApiRecipe || platformPackUsed;
       if (existing) {
         retailerId = existing.id;
         if (recipeChanged) {
-          await db.transaction(async (tx) => {
+          recipeVersion = await db.transaction(async (tx) => {
             await tx
               .update(schema.retailers)
               .set({
@@ -256,7 +258,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
                 updatedAt: new Date(),
               })
               .where(eq(schema.retailers.id, retailerId));
-            await writeRecipeVersion(
+            return writeRecipeVersion(
               {
                 retailerId,
                 crawlRecipe: discovery.crawlRecipe,
@@ -268,6 +270,14 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
               tx,
             );
           });
+        } else {
+          const [row] = await db
+            .select({ version: schema.retailerRecipeVersions.version })
+            .from(schema.retailerRecipeVersions)
+            .where(eq(schema.retailerRecipeVersions.retailerId, retailerId))
+            .orderBy(desc(schema.retailerRecipeVersions.version))
+            .limit(1);
+          recipeVersion = row?.version ?? 1;
         }
       } else {
         // Re-check the plan limit at promotion time — the org may have hit the
@@ -292,7 +302,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           return;
         }
 
-        const [created] = await db.transaction(async (tx) => {
+        const created = await db.transaction(async (tx) => {
           const [row] = await tx
             .insert(schema.retailers)
             .values({
@@ -320,8 +330,8 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
               discoveryConfidence: discovery.confidence,
             })
             .returning({ id: schema.retailers.id });
-          if (!row) return [];
-          await writeRecipeVersion(
+          if (!row) return null;
+          const version = await writeRecipeVersion(
             {
               retailerId: row.id,
               crawlRecipe: discovery.crawlRecipe,
@@ -332,13 +342,14 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
             },
             tx,
           );
-          return [row];
+          return { id: row.id, version };
         });
         if (!created) {
           await markFailed(onboardingId, 'Failed to create the store record', view);
           return;
         }
         retailerId = created.id;
+        recipeVersion = created.version;
       }
 
       if (jinaResult && hasJinaRecipe) {
@@ -353,6 +364,29 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         .insert(schema.orgCompetitors)
         .values({ orgId: onboarding.orgId, retailerId })
         .onConflictDoNothing();
+
+      try {
+        const docsDir = await writeKnowledgeDocs({
+          retailerKey: discovery.key,
+          retailerId,
+          retailerName: discovery.name,
+          domain: discovery.domain,
+          homepageUrl: discovery.homepageUrl,
+          fingerprint,
+          crawlRecipe: discovery.crawlRecipe,
+          confidence: discovery.confidence,
+          validationReport: apiValidationReport,
+          recipeVersion,
+          notes: discovery.notes,
+          requestDelayMs: discovery.crawlDelayMs ?? 3000,
+        });
+        log.info('wrote retailer knowledge docs', { retailerKey: discovery.key, docsDir });
+      } catch (err) {
+        log.warn('failed to write knowledge docs', {
+          retailerKey: discovery.key,
+          err: String(err),
+        });
+      }
 
       // Kick off the first crawl (only runs once the discover worker consumes it).
       const [run] = await db

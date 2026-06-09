@@ -2,6 +2,8 @@ import './load-env.js';
 import { createLogger } from '@retailer/core';
 import { startDiscoverConfigWorker } from './consumers/discover-config.js';
 import { startDiscoverWorker } from './consumers/discover.js';
+import { startCrawlHealthWorker } from './consumers/crawl-health.js';
+import { startDiscoverRepairWorker } from './consumers/discover-repair.js';
 import { startFetchWorker } from './consumers/fetch.js';
 import { startExtractWorker } from './consumers/extract.js';
 import { startMatchWorker } from './consumers/match.js';
@@ -22,6 +24,8 @@ async function main() {
     startFetchWorker(),
     startExtractWorker(),
     startMatchWorker(),
+    startCrawlHealthWorker(),
+    startDiscoverRepairWorker(),
     startAnalyticsWorker(),
     startReportsWorker(),
   ];

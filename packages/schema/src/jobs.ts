@@ -9,6 +9,8 @@ export const QueueName = {
   Match: 'pipeline-match',
   Analytics: 'analytics-compute',
   Reports: 'reports-send',
+  CrawlHealth: 'crawl-health',
+  DiscoverRepair: 'store-discover-repair',
 } as const;
 export type QueueName = (typeof QueueName)[keyof typeof QueueName];
 
@@ -66,3 +68,18 @@ export const ReportJobSchema = z.object({
   periodEnd: z.coerce.date(),
 });
 export type ReportJob = z.infer<typeof ReportJobSchema>;
+
+/** Post-crawl health evaluation. */
+export const CrawlHealthJobSchema = z.object({
+  retailerKey: z.string(),
+  crawlRunId: z.string().uuid(),
+});
+export type CrawlHealthJob = z.infer<typeof CrawlHealthJobSchema>;
+
+/** Incremental crawl config repair after health degradation. */
+export const DiscoverRepairJobSchema = z.object({
+  retailerKey: z.string(),
+  trigger: z.enum(['health_drop', 'endpoint_failure', 'schema_drift', 'manual']),
+  healthReportId: z.string().uuid().optional(),
+});
+export type DiscoverRepairJob = z.infer<typeof DiscoverRepairJobSchema>;

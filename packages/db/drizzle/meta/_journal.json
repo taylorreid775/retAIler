@@ -43,6 +43,13 @@
       "when": 1780800000000,
       "tag": "0005_discovery_schema",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1780805000000,
+      "tag": "0006_crawl_health_schema",
+      "breakpoints": true
     }
   ]
 }

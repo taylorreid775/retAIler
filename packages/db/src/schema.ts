@@ -187,6 +187,54 @@ export const crawlRuns = pgTable('crawl_runs', {
   finishedAt: timestamp('finished_at', { withTimezone: true }),
 });
 
+/** Per-crawl health metrics; drives repair and rediscovery triggers. */
+export const crawlHealthReports = pgTable(
+  'crawl_health_reports',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    crawlRunId: uuid('crawl_run_id').references(() => crawlRuns.id, { onDelete: 'set null' }),
+    catalogSize: integer('catalog_size'),
+    previousCatalogSize: integer('previous_catalog_size'),
+    coverageRatio: real('coverage_ratio'),
+    endpointSuccessRate: real('endpoint_success_rate'),
+    extractionSuccessRate: real('extraction_success_rate'),
+    priceFieldPresence: real('price_field_presence'),
+    healthScore: real('health_score').notNull(),
+    anomalies: jsonb('anomalies')
+      .$type<import('@retailer/schema').HealthAnomaly[]>()
+      .default([]),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    retailerIdx: index('crawl_health_reports_retailer_id_idx').on(t.retailerId),
+    createdAtIdx: index('crawl_health_reports_created_at_idx').on(t.createdAt),
+  }),
+);
+
+/** Incremental repair attempt log. */
+export const discoveryRepairs = pgTable(
+  'discovery_repairs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    trigger: text('trigger').notNull(),
+    repairType: text('repair_type').notNull(),
+    beforeRecipeVersion: integer('before_recipe_version'),
+    afterRecipeVersion: integer('after_recipe_version'),
+    success: boolean('success').notNull(),
+    details: jsonb('details'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    retailerIdx: index('discovery_repairs_retailer_id_idx').on(t.retailerId),
+  }),
+);
+
 // ─── Taxonomy ───────────────────────────────────────────────────────────
 export const brands = pgTable(
   'brands',
