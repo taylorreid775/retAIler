@@ -63,6 +63,7 @@ export const SPORTCHEK_CRAWL_RECIPE: CrawlRecipe = {
       ],
     },
     pagination: {
+      style: 'page',
       pageParam: 'page',
       itemsPerPage: 10,
       totalPagesPath: 'pagination.total',

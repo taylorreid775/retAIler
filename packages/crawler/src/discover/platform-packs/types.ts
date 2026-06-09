@@ -49,17 +49,18 @@ export function mergePlatformPackIntoDiscovery<T extends ApiMergeDiscovery>(
   sampleUrls: string[],
   platform: CrawlRecipe['platform'],
   probeUrl: string,
+  fetchStrategy: 'static' | 'browser',
+  confidence: number,
 ): T {
   const pattern = productUrlPattern ?? discovery.productUrlPattern;
   const samples = sampleUrls.length ? sampleUrls : discovery.sampleProductUrls;
-  const confidence = Math.max(discovery.confidence, samples.length >= 3 ? 0.9 : 0.75);
 
   return {
     ...discovery,
     confidence,
     productUrlPattern: pattern,
     sampleProductUrls: samples.slice(0, 8),
-    fetchStrategy: 'static',
+    fetchStrategy,
     notes: `${discovery.notes}; platform pack confirmed catalog API (${probeUrl})`,
     crawlRecipe: {
       ...discovery.crawlRecipe,
@@ -68,7 +69,7 @@ export function mergePlatformPackIntoDiscovery<T extends ApiMergeDiscovery>(
       api,
       productUrlPattern: pattern,
       sampleProductUrls: samples.slice(0, 8),
-      fetchStrategy: 'static',
+      fetchStrategy,
       confidence,
       sources: [...new Set([...discovery.crawlRecipe.sources, 'platform' as const])],
       notes: [...discovery.crawlRecipe.notes, `platform_pack: ${probeUrl}`],

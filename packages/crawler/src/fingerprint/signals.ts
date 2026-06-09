@@ -2,7 +2,24 @@ import type { Platform } from '@retailer/schema';
 
 export interface PlatformSignalInput {
   lowerHtml: string;
+  homepageHtml?: string | null;
   urls: string[];
+}
+
+function extractSfccSiteFromNextData(html: string): string | null {
+  const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+  if (!match) return null;
+  try {
+    const data = JSON.parse(match[1]!) as Record<string, unknown>;
+    const props = data.props as Record<string, unknown> | undefined;
+    const site =
+      (props?.pageProps as Record<string, unknown> | undefined)?.site ??
+      props?.site;
+    if (typeof site === 'string' && /^[A-Za-z0-9_-]+$/.test(site)) return site;
+  } catch {
+    // ignore malformed __NEXT_DATA__
+  }
+  return null;
 }
 
 export interface PlatformSignalResult {
@@ -16,6 +33,7 @@ export interface PlatformSignalResult {
 /** Weighted platform detection from homepage HTML and discovered URLs. */
 export function detectPlatformSignals(input: PlatformSignalInput): PlatformSignalResult {
   const { lowerHtml: lower, urls } = input;
+  const html = input.homepageHtml ?? input.lowerHtml;
   const apiHints: string[] = [];
   const bundleSignals: string[] = [];
 
@@ -63,10 +81,12 @@ export function detectPlatformSignals(input: PlatformSignalInput): PlatformSigna
     add('salesforce', 0.35);
     bundleSignals.push('demandware');
   }
-  if (lower.includes('__next_data__') && (lower.includes('"site"') || lower.includes('props.site'))) {
-    add('salesforce', 0.15);
+  const sfccSite = extractSfccSiteFromNextData(html);
+  if (sfccSite && (lower.includes('demandware') || lower.includes('dw.ac'))) {
+    add('salesforce', 0.2);
+    apiHints.push(`sfcc-site:${sfccSite}`);
   }
-  if (/\/s\/[a-z0-9_-]+\//i.test(lower)) {
+  if (/\/s\/[a-z0-9_-]+\/dw\/shop\//i.test(lower)) {
     add('salesforce', 0.1);
     apiHints.push('sfcc-site-path');
   }

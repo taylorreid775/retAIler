@@ -100,12 +100,40 @@ function mapApiProduct(
   };
 }
 
+/** Map a single API product object — used by validation probes. */
+export const mapApiProductFromRecord = mapApiProduct;
+
 function buildApiUrl(baseUrl: string, query: Record<string, string>): string {
   const url = new URL(baseUrl);
   for (const [k, v] of Object.entries(query)) {
     url.searchParams.set(k, v);
   }
   return url.toString();
+}
+
+/** Build query params for a paginated API request (page 1-indexed). */
+export function buildApiPageQuery(
+  api: ApiRecipe,
+  page: number,
+  categoryValue = '',
+): Record<string, string> {
+  const query: Record<string, string> = {};
+  for (const [k, v] of Object.entries(api.staticQuery)) {
+    query[k] = resolveRecipeValue(v);
+  }
+  if (api.categoryParam && categoryValue) {
+    query[api.categoryParam.name] = categoryValue;
+  }
+  const pagination = api.pagination;
+  const pageSize = pagination.itemsPerPage ?? 24;
+  query[pagination.pageParam] =
+    pagination.style === 'offset' ? String((page - 1) * pageSize) : String(page);
+  return query;
+}
+
+/** Full URL for a paginated API page (page 1-indexed). */
+export function buildApiPageUrl(api: ApiRecipe, page: number, categoryValue = ''): string {
+  return buildApiUrl(api.baseUrl, buildApiPageQuery(api, page, categoryValue));
 }
 
 type CategorySlice = { value: string; label?: string; key?: string };
@@ -163,14 +191,7 @@ export async function* discoverProductsFromApiRecipe(
     while (true) {
       if (ctx.limit && count >= ctx.limit) return;
 
-      const query: Record<string, string> = {};
-      for (const [k, v] of Object.entries(api.staticQuery)) {
-        query[k] = resolveRecipeValue(v);
-      }
-      if (api.categoryParam && category.value) {
-        query[api.categoryParam.name] = category.value;
-      }
-      query[pagination.pageParam] = String(page);
+      const query = buildApiPageQuery(api, page, category.value);
 
       const url = buildApiUrl(api.baseUrl, query);
       const data = await fetchPageWithRetry(ctx, url, api.headers);

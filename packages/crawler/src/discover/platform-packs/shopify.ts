@@ -53,6 +53,7 @@ export const shopifyPlatformPack: PlatformPack = {
         limit: '250',
       },
       pagination: {
+        style: 'page',
         pageParam: 'page',
         itemsPerPage: 250,
         maxPages: 100,

@@ -1,6 +1,6 @@
 import type { CrawlRecipe, RetailerFingerprint } from '@retailer/schema';
 import { eq, sql } from 'drizzle-orm';
-import { db } from './client';
+import { db, type Database } from './client';
 import * as schema from './schema';
 
 function primaryEndpointFromRecipe(recipe: CrawlRecipe): string {
@@ -19,17 +19,23 @@ export interface WriteRecipeVersionParams {
   validationReport?: unknown;
 }
 
+type DbExecutor = Pick<Database, 'insert' | 'update' | 'select'>;
+
 /** Insert an immutable recipe version and update denormalized retailer columns. */
-export async function writeRecipeVersion(params: WriteRecipeVersionParams): Promise<number> {
-  const [{ maxVersion } = { maxVersion: 0 }] = await db
+export async function writeRecipeVersion(
+  params: WriteRecipeVersionParams,
+  tx: DbExecutor = db,
+): Promise<number> {
+  const [{ maxVersion } = { maxVersion: 0 }] = await tx
     .select({ maxVersion: sql<number>`coalesce(max(${schema.retailerRecipeVersions.version}), 0)` })
     .from(schema.retailerRecipeVersions)
     .where(eq(schema.retailerRecipeVersions.retailerId, params.retailerId));
 
   const version = (maxVersion ?? 0) + 1;
   const primaryEndpoint = primaryEndpointFromRecipe(params.crawlRecipe);
+  const isFirstVersion = version === 1;
 
-  await db.insert(schema.retailerRecipeVersions).values({
+  await tx.insert(schema.retailerRecipeVersions).values({
     retailerId: params.retailerId,
     version,
     crawlRecipe: params.crawlRecipe,
@@ -40,15 +46,41 @@ export async function writeRecipeVersion(params: WriteRecipeVersionParams): Prom
     createdBy: params.createdBy,
   });
 
-  await db
+  await tx
     .update(schema.retailers)
     .set({
+      crawlRecipe: params.crawlRecipe,
       fingerprint: params.fingerprint ?? null,
       discoveryConfidence: params.confidence,
-      crawlHealthScore: 1,
+      ...(isFirstVersion ? { crawlHealthScore: 1 } : {}),
       updatedAt: new Date(),
     })
     .where(eq(schema.retailers.id, params.retailerId));
 
   return version;
+}
+
+export interface PromoteRetailerRecipeParams extends WriteRecipeVersionParams {
+  /** When set, updates an existing retailer row inside the same transaction. */
+  retailerUpdate?: {
+    fetchStrategy?: (typeof schema.retailers.$inferSelect)['fetchStrategy'];
+    productUrlPattern?: string | null;
+    discoveryNotes?: string | null;
+  };
+}
+
+/** Atomically persist retailer recipe fields and an immutable version row. */
+export async function promoteRetailerRecipe(params: PromoteRetailerRecipeParams): Promise<number> {
+  return db.transaction(async (tx) => {
+    if (params.retailerUpdate) {
+      await tx
+        .update(schema.retailers)
+        .set({
+          ...params.retailerUpdate,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.retailers.id, params.retailerId));
+    }
+    return writeRecipeVersion(params, tx);
+  });
 }

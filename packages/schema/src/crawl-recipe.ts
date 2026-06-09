@@ -3,6 +3,8 @@ import { CurrencySchema } from './common';
 
 /** Pagination settings for API-based catalog discovery. */
 export const ApiPaginationSchema = z.object({
+  /** `page` increments 1,2,3…; `offset` uses (page-1)*itemsPerPage for start/offset params. */
+  style: z.enum(['page', 'offset']).default('page'),
   pageParam: z.string().default('page'),
   itemsPerPage: z.number().int().positive().optional(),
   /** Dot-path to total page count (e.g. pagination.total). */

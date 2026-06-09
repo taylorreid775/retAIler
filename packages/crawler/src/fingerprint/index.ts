@@ -26,7 +26,11 @@ export interface FingerprintSiteInput {
 export function fingerprintSite(input: FingerprintSiteInput): RetailerFingerprint {
   const lowerHtml = (input.homepageHtml ?? '').toLowerCase();
   const urls = input.agentUrls ?? [];
-  const platformSignals = detectPlatformSignals({ lowerHtml, urls });
+  const platformSignals = detectPlatformSignals({
+    lowerHtml,
+    homepageHtml: input.homepageHtml,
+    urls,
+  });
   const framework = detectFramework(lowerHtml);
   const botProtection = detectBotProtection(lowerHtml, input.responseHeaders);
 

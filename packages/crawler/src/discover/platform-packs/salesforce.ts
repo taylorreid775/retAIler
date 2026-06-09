@@ -29,11 +29,11 @@ function extractSiteId(ctx: ProbeContext): string | null {
   return null;
 }
 
-function productHits(body: unknown): unknown[] | null {
+function productHits(body: unknown): { items: unknown[]; path: string } | null {
   const paths = ['hits', 'products', 'data.products', 'productSearch.hits'];
   for (const path of paths) {
     const value = getAtPath(body, path);
-    if (Array.isArray(value) && value.length > 0) return value;
+    if (Array.isArray(value) && value.length > 0) return { items: value, path };
   }
   return null;
 }
@@ -56,14 +56,14 @@ export const salesforcePlatformPack: PlatformPack = {
         Accept: 'application/json',
       },
       successCheck: (res) => {
-        const hits = productHits(res.body);
-        return res.status >= 200 && res.status < 300 && (hits?.length ?? 0) > 0;
+        const hit = productHits(res.body);
+        return res.status >= 200 && res.status < 300 && (hit?.items.length ?? 0) > 0;
       },
     },
   ],
   buildRecipe(ctx, probeUrl, response): ApiRecipe | null {
-    const hits = productHits(response.body);
-    if (!hits?.length) return null;
+    const hit = productHits(response.body);
+    if (!hit?.items.length) return null;
 
     const siteId = extractSiteId(ctx);
     if (!siteId) return null;
@@ -79,13 +79,14 @@ export const salesforcePlatformPack: PlatformPack = {
         q: '',
       },
       pagination: {
+        style: 'offset',
         pageParam: 'start',
         itemsPerPage: 24,
-        totalPagesPath: 'count',
+        totalPagesPath: null,
         maxPages: 100,
         delayMs: 800,
       },
-      productsPath: hits === getAtPath(response.body, 'hits') ? 'hits' : 'products',
+      productsPath: hit.path,
       fieldMap: {
         title: ['productName', 'name', 'title'],
         url: ['productUrl', 'url', 'link'],

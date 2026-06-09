@@ -17,6 +17,7 @@ import { getRetailer, type RetailerRow } from '../retailers.js';
 import { fetcherFor } from '../fetchers.js';
 import { BrowserFetcher } from '../browser-fetcher.js';
 import { createDiscoverFetchText } from '../discover-fetch.js';
+import { createApiFetchJson } from '../api-fetch.js';
 import { SCHEDULED_RUN_SENTINEL } from '../scheduler.js';
 
 const log = createLogger('worker:discover');
@@ -144,23 +145,10 @@ export function startDiscoverWorker(): Worker<DiscoverJob> {
         log,
       });
 
-      // Catalog/search JSON APIs use plain fetch — no Playwright (faster, no browser binary lock-in).
-      const fetchJson = async (
-        url: string,
-        headers: Record<string, string> = {},
-      ): Promise<unknown | null> => {
-        try {
-          const res = await fetch(url, { headers, signal: AbortSignal.timeout(45_000) });
-          if (!res.ok) {
-            log.warn('API JSON fetch failed', { url, status: res.status });
-            return null;
-          }
-          return (await res.json()) as unknown;
-        } catch (err) {
-          log.warn('API JSON fetch error', { url, err: String(err) });
-          return null;
-        }
-      };
+      const fetchJson = createApiFetchJson({
+        fetchStrategy: retailer.fetchStrategy,
+        browserFetcher,
+      });
 
       const discoverCtx = { categoryFilter, limit, fetchText, fetchJson };
 

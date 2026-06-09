@@ -10,6 +10,7 @@ import {
   mergeApiIntoDiscovery,
   saveListingPages,
   validateApiRecipe,
+  type ApiRecipeValidation,
   fingerprintSite,
   runPlatformPack,
   mergePlatformPackIntoDiscovery,
@@ -21,6 +22,7 @@ import { QueueName, PLAN_LIMITS, type DiscoverConfigJob, type RetailerFingerprin
 import { createDiscoverFetchText } from '../discover-fetch.js';
 import { fetcherFor } from '../fetchers.js';
 import { BrowserFetcher } from '../browser-fetcher.js';
+import { createApiFetchJson } from '../api-fetch.js';
 import { captureNetworkJson } from '../network-capture.js';
 
 const log = createLogger('worker:discover-config');
@@ -104,9 +106,13 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       });
 
       let platformPackUsed = false;
+      let apiValidationReport: ApiRecipeValidation['report'] | null = null;
       const platformPackResult = await tryPlatformPackDiscovery(discovery, fingerprint);
       discovery = platformPackResult.discovery;
       platformPackUsed = platformPackResult.used;
+      if (platformPackResult.validationReport) {
+        apiValidationReport = platformPackResult.validationReport;
+      }
 
       let jinaResult: CategoryDirectoryResult | null = null;
       if (!platformPackUsed) {
@@ -154,7 +160,11 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         !platformPackUsed && !jinaResult && (discovery.confidence <= 0 || !discovery.productUrlPattern);
 
       if (needsApiSniff) {
-        discovery = await tryNetworkApiDiscovery(inputUrl, discovery);
+        const networkResult = await tryNetworkApiDiscovery(inputUrl, discovery);
+        discovery = networkResult.discovery;
+        if (networkResult.validationReport) {
+          apiValidationReport = networkResult.validationReport;
+        }
       }
 
       const effectivePattern =
@@ -218,24 +228,27 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       if (existing) {
         retailerId = existing.id;
         if (recipeChanged) {
-          await db
-            .update(schema.retailers)
-            .set({
-              fetchStrategy: discovery.fetchStrategy,
-              productUrlPattern: discovery.productUrlPattern,
-              crawlRecipe: discovery.crawlRecipe,
-              discoveryNotes: discovery.notes,
-              fingerprint,
-              discoveryConfidence: discovery.confidence,
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.retailers.id, retailerId));
-          await writeRecipeVersion({
-            retailerId,
-            crawlRecipe: discovery.crawlRecipe,
-            fingerprint,
-            confidence: discovery.confidence,
-            createdBy: 'discovery',
+          await db.transaction(async (tx) => {
+            await tx
+              .update(schema.retailers)
+              .set({
+                fetchStrategy: discovery.fetchStrategy,
+                productUrlPattern: discovery.productUrlPattern,
+                discoveryNotes: discovery.notes,
+                updatedAt: new Date(),
+              })
+              .where(eq(schema.retailers.id, retailerId));
+            await writeRecipeVersion(
+              {
+                retailerId,
+                crawlRecipe: discovery.crawlRecipe,
+                fingerprint,
+                confidence: discovery.confidence,
+                validationReport: apiValidationReport,
+                createdBy: 'discovery',
+              },
+              tx,
+            );
           });
         }
       } else {
@@ -261,45 +274,53 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           return;
         }
 
-        const [created] = await db
-          .insert(schema.retailers)
-          .values({
-            key: discovery.key,
-            name: discovery.name,
-            domain: discovery.domain,
-            country: 'CA',
-            source: 'user',
-            enabled: true,
-            respectRobotsTxt: true,
-            requestDelayMs: discovery.crawlDelayMs ?? 3000,
-            fetchStrategy: discovery.fetchStrategy,
-            homepageUrl: discovery.homepageUrl,
-            sitemapUrl: (discovery.sitemapUrls.length
-              ? discovery.sitemapUrls
-              : [discovery.sitemapUrl]
-            )
-              .filter(Boolean)
-              .join('\n'),
-            productUrlPattern: discovery.productUrlPattern,
-            llmsTxtUrl: discovery.llmsTxtUrl,
-            crawlRecipe: discovery.crawlRecipe,
-            discoveryNotes: discovery.notes,
-            fingerprint,
-            discoveryConfidence: discovery.confidence,
-          })
-          .returning({ id: schema.retailers.id });
+        const [created] = await db.transaction(async (tx) => {
+          const [row] = await tx
+            .insert(schema.retailers)
+            .values({
+              key: discovery.key,
+              name: discovery.name,
+              domain: discovery.domain,
+              country: 'CA',
+              source: 'user',
+              enabled: true,
+              respectRobotsTxt: true,
+              requestDelayMs: discovery.crawlDelayMs ?? 3000,
+              fetchStrategy: discovery.fetchStrategy,
+              homepageUrl: discovery.homepageUrl,
+              sitemapUrl: (discovery.sitemapUrls.length
+                ? discovery.sitemapUrls
+                : [discovery.sitemapUrl]
+              )
+                .filter(Boolean)
+                .join('\n'),
+              productUrlPattern: discovery.productUrlPattern,
+              llmsTxtUrl: discovery.llmsTxtUrl,
+              crawlRecipe: discovery.crawlRecipe,
+              discoveryNotes: discovery.notes,
+              fingerprint,
+              discoveryConfidence: discovery.confidence,
+            })
+            .returning({ id: schema.retailers.id });
+          if (!row) return [];
+          await writeRecipeVersion(
+            {
+              retailerId: row.id,
+              crawlRecipe: discovery.crawlRecipe,
+              fingerprint,
+              confidence: discovery.confidence,
+              validationReport: apiValidationReport,
+              createdBy: 'discovery',
+            },
+            tx,
+          );
+          return [row];
+        });
         if (!created) {
           await markFailed(onboardingId, 'Failed to create the store record', view);
           return;
         }
         retailerId = created.id;
-        await writeRecipeVersion({
-          retailerId,
-          crawlRecipe: discovery.crawlRecipe,
-          fingerprint,
-          confidence: discovery.confidence,
-          createdBy: 'discovery',
-        });
       }
 
       if (jinaResult && hasJinaRecipe) {
@@ -344,83 +365,109 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
 async function tryPlatformPackDiscovery(
   discovery: SiteDiscovery,
   fingerprint: RetailerFingerprint,
-): Promise<{ discovery: SiteDiscovery; used: boolean }> {
+): Promise<{ discovery: SiteDiscovery; used: boolean; validationReport?: ApiRecipeValidation['report'] }> {
   if (fingerprint.platformConfidence < 0.5 || fingerprint.recommendedStrategy !== 'platform_pack') {
     return { discovery, used: false };
   }
 
   const browserFetcher = fetcherFor('browser') as BrowserFetcher;
-  const fetchJson = async (url: string, headers: Record<string, string> = {}) => {
-    const res = await browserFetcher.fetchJson(url, headers);
-    if (res.status < 200 || res.status >= 300) return null;
-    try {
-      return JSON.parse(res.text) as unknown;
-    } catch {
-      return null;
-    }
-  };
+  const strategies: Array<'static' | 'browser'> = ['static', 'browser'];
 
-  const packResult = await runPlatformPack(fingerprint, {
-    origin: discovery.homepageUrl,
-    domain: discovery.domain,
-    homepageHtml: discovery.homepageHtml,
-    fetchJson,
-  });
-  if (!packResult) {
-    log.info('platform pack found no validated endpoint', { key: discovery.key, platform: fingerprint.platform });
-    return { discovery, used: false };
-  }
-
-  const sampleUrls: string[] = [];
-  const draft = mergePlatformPackIntoDiscovery(
-    discovery,
-    packResult.api,
-    packResult.productUrlPattern,
-    sampleUrls,
-    crawlRecipePlatformFromFingerprint(fingerprint),
-    packResult.probeUrl,
-  );
-
-  const validation = await validateApiRecipe(draft.crawlRecipe, discovery.key, fetchJson, 3);
-  if (!validation.ok) {
-    log.warn('platform pack recipe failed validation', {
-      key: discovery.key,
-      endpoint: packResult.api.baseUrl,
-      samples: validation.count,
+  for (const fetchStrategy of strategies) {
+    const fetchJson = createApiFetchJson({ fetchStrategy, browserFetcher });
+    const packResult = await runPlatformPack(fingerprint, {
+      origin: discovery.homepageUrl,
+      domain: discovery.domain,
+      homepageHtml: discovery.homepageHtml,
+      fetchJson,
     });
-    return { discovery, used: false };
-  }
+    if (!packResult) continue;
 
-  log.info('platform pack recipe validated', {
-    key: discovery.key,
-    products: validation.count,
-    endpoint: packResult.api.baseUrl,
-  });
-
-  return {
-    discovery: mergePlatformPackIntoDiscovery(
+    const draft = mergePlatformPackIntoDiscovery(
       discovery,
       packResult.api,
       packResult.productUrlPattern,
-      validation.samples.map((s) => s.sourceUrl),
+      [],
       crawlRecipePlatformFromFingerprint(fingerprint),
       packResult.probeUrl,
-    ),
-    used: true,
-  };
+      fetchStrategy,
+      discovery.confidence,
+    );
+
+    const validation = await validateApiRecipe(draft.crawlRecipe, discovery.key, fetchJson, 3);
+    if (!validation.ok) {
+      log.warn('platform pack recipe failed validation', {
+        key: discovery.key,
+        endpoint: packResult.api.baseUrl,
+        fetchStrategy,
+        failureModes: validation.report.failureModes,
+      });
+      continue;
+    }
+
+    log.info('platform pack recipe validated', {
+      key: discovery.key,
+      products: validation.count,
+      endpoint: packResult.api.baseUrl,
+      fetchStrategy,
+      confidence: validation.report.confidence,
+    });
+
+    return {
+      discovery: mergePlatformPackIntoDiscovery(
+        discovery,
+        packResult.api,
+        packResult.productUrlPattern,
+        validation.samples.map((s) => s.sourceUrl),
+        crawlRecipePlatformFromFingerprint(fingerprint),
+        packResult.probeUrl,
+        fetchStrategy,
+        validation.report.confidence,
+      ),
+      used: true,
+      validationReport: validation.report,
+    };
+  }
+
+  log.info('platform pack found no validated endpoint', { key: discovery.key, platform: fingerprint.platform });
+  return { discovery, used: false };
+}
+
+async function validateRecipeWithTransport(
+  discovery: SiteDiscovery,
+  crawlRecipe: SiteDiscovery['crawlRecipe'],
+): Promise<{
+  ok: boolean;
+  validation: ApiRecipeValidation;
+  fetchStrategy: 'static' | 'browser';
+  fetchJson: ReturnType<typeof createApiFetchJson>;
+} | null> {
+  const browserFetcher = fetcherFor('browser') as BrowserFetcher;
+  let last: ApiRecipeValidation | null = null;
+  for (const fetchStrategy of ['static', 'browser'] as const) {
+    const fetchJson = createApiFetchJson({ fetchStrategy, browserFetcher });
+    const validation = await validateApiRecipe(crawlRecipe, discovery.key, fetchJson, 3);
+    last = validation;
+    if (validation.ok) {
+      return { ok: true, validation, fetchStrategy, fetchJson };
+    }
+  }
+  if (!last) return null;
+  const fetchJson = createApiFetchJson({ fetchStrategy: 'static', browserFetcher });
+  return { ok: false, validation: last, fetchStrategy: 'static', fetchJson };
 }
 
 /** Phase B: sniff XHR/fetch traffic, infer + validate an API crawl recipe. */
 async function tryNetworkApiDiscovery(
   inputUrl: string,
   discovery: SiteDiscovery,
-): Promise<SiteDiscovery> {
+): Promise<{ discovery: SiteDiscovery; validationReport?: ApiRecipeValidation['report'] }> {
   log.info('network API sniff starting', { inputUrl, key: discovery.key });
 
   const captures = await captureNetworkJson(inputUrl);
   if (!captures.length) {
     log.info('network API sniff found no product-like JSON', { inputUrl });
-    return discovery;
+    return { discovery };
   }
 
   const inferred = await inferApiRecipeFromCaptures(captures, {
@@ -429,19 +476,8 @@ async function tryNetworkApiDiscovery(
   });
   if (!inferred) {
     log.warn('network API sniff could not infer recipe', { inputUrl, captures: captures.length });
-    return discovery;
+    return { discovery };
   }
-
-  const browserFetcher = fetcherFor('browser') as BrowserFetcher;
-  const fetchJson = async (url: string, headers: Record<string, string> = {}) => {
-    const res = await browserFetcher.fetchJson(url, headers);
-    if (res.status < 200 || res.status >= 300) return null;
-    try {
-      return JSON.parse(res.text) as unknown;
-    } catch {
-      return null;
-    }
-  };
 
   const draft = mergeApiIntoDiscovery(
     discovery,
@@ -450,26 +486,41 @@ async function tryNetworkApiDiscovery(
     discovery.sampleProductUrls,
   );
 
-  const validation = await validateApiRecipe(draft.crawlRecipe, discovery.key, fetchJson, 3);
-  if (!validation.ok) {
+  const validated = await validateRecipeWithTransport(discovery, draft.crawlRecipe);
+  if (!validated?.ok) {
     log.warn('inferred API recipe failed validation', {
       key: discovery.key,
-      samples: validation.count,
+      failureModes: validated?.validation.report.failureModes,
     });
-    return discovery;
+    return { discovery };
   }
 
   log.info('network API recipe validated', {
     key: discovery.key,
-    products: validation.count,
+    products: validated.validation.count,
     endpoint: inferred.api.baseUrl,
+    fetchStrategy: validated.fetchStrategy,
   });
 
-  return mergeApiIntoDiscovery(
+  const merged = mergeApiIntoDiscovery(
     discovery,
     inferred.api,
     inferred.productUrlPattern,
-    validation.samples.map((s) => s.sourceUrl),
+    validated.validation.samples.map((s) => s.sourceUrl),
   );
+
+  return {
+    discovery: {
+      ...merged,
+      fetchStrategy: validated.fetchStrategy,
+      confidence: validated.validation.report.confidence,
+      crawlRecipe: {
+        ...merged.crawlRecipe,
+        fetchStrategy: validated.fetchStrategy,
+        confidence: validated.validation.report.confidence,
+      },
+    },
+    validationReport: validated.validation.report,
+  };
 }
 

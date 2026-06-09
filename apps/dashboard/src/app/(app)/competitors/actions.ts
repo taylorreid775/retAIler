@@ -251,44 +251,50 @@ async function promoteDiscoveredStore(
     agentUrls: discovery.crawlRecipe.sampleProductUrls,
   });
 
-  const [retailer] = await db
-    .insert(schema.retailers)
-    .values({
-      key: discovery.key,
-      name: discovery.name,
-      domain: discovery.domain,
-      country: 'CA',
-      source: 'user',
-      enabled: true,
-      respectRobotsTxt: true,
-      requestDelayMs: discovery.crawlDelayMs ?? 3000,
-      fetchStrategy: discovery.fetchStrategy,
-      homepageUrl: discovery.homepageUrl,
-      sitemapUrl: (discovery.sitemapUrls.length ? discovery.sitemapUrls : [discovery.sitemapUrl])
-        .filter(Boolean)
-        .join('\n'),
-      productUrlPattern: discovery.productUrlPattern,
-      llmsTxtUrl: discovery.llmsTxtUrl,
-      crawlRecipe: discovery.crawlRecipe,
-      discoveryNotes: discovery.notes,
-      fingerprint,
-      discoveryConfidence: discovery.confidence,
-    })
-    .returning();
+  const [retailer] = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(schema.retailers)
+      .values({
+        key: discovery.key,
+        name: discovery.name,
+        domain: discovery.domain,
+        country: 'CA',
+        source: 'user',
+        enabled: true,
+        respectRobotsTxt: true,
+        requestDelayMs: discovery.crawlDelayMs ?? 3000,
+        fetchStrategy: discovery.fetchStrategy,
+        homepageUrl: discovery.homepageUrl,
+        sitemapUrl: (discovery.sitemapUrls.length ? discovery.sitemapUrls : [discovery.sitemapUrl])
+          .filter(Boolean)
+          .join('\n'),
+        productUrlPattern: discovery.productUrlPattern,
+        llmsTxtUrl: discovery.llmsTxtUrl,
+        crawlRecipe: discovery.crawlRecipe,
+        discoveryNotes: discovery.notes,
+        fingerprint,
+        discoveryConfidence: discovery.confidence,
+      })
+      .returning();
+    if (!row) return [];
+    await writeRecipeVersion(
+      {
+        retailerId: row.id,
+        crawlRecipe: discovery.crawlRecipe,
+        fingerprint,
+        confidence: discovery.confidence,
+        createdBy: 'discovery',
+      },
+      tx,
+    );
+    return [row];
+  });
   if (!retailer) {
     await markOnboardingFailed(onboardingId, 'Failed to create the store record');
     revalidatePath('/competitors');
     revalidatePath('/');
     return { error: 'Failed to create the store record' };
   }
-
-  await writeRecipeVersion({
-    retailerId: retailer.id,
-    crawlRecipe: discovery.crawlRecipe,
-    fingerprint,
-    confidence: discovery.confidence,
-    createdBy: 'discovery',
-  });
 
   await db
     .insert(schema.orgCompetitors)
