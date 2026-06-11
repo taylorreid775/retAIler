@@ -36,11 +36,14 @@ function looksLikeXml(text: string): boolean {
 export function createDiscoverFetchText(opts: {
   fetchStrategy: 'static' | 'browser' | 'jina_reader';
   log?: Logger;
+  /** When set, use this isolated browser (discovery job lease) instead of the global singleton. */
+  browserFetcher?: BrowserFetcher | null;
 }): (url: string) => Promise<string | null> {
   const log = opts.log ?? defaultLog;
   const staticFetcher = fetcherFor('static');
   const browserFetcher =
-    opts.fetchStrategy === 'browser' ? (fetcherFor('browser') as BrowserFetcher) : null;
+    opts.browserFetcher ??
+    (opts.fetchStrategy === 'browser' ? (fetcherFor('browser') as BrowserFetcher) : null);
 
   return async (url: string): Promise<string | null> => {
     const tryStatic = async () => {

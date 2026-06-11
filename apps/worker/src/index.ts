@@ -1,5 +1,6 @@
 import './load-env.js';
 import { createLogger } from '@retailer/core';
+import { Worker } from '@retailer/jobs';
 import { startDiscoverConfigWorker } from './consumers/discover-config.js';
 import { startDiscoverWorker } from './consumers/discover.js';
 import { startCrawlHealthWorker } from './consumers/crawl-health.js';
@@ -12,25 +13,38 @@ import { startReportsWorker } from './consumers/reports.js';
 import { registerSchedules } from './scheduler.js';
 import { startHealthServer } from './health.js';
 import { closeFetchers } from './fetchers.js';
+import { closeBrowserPool } from './browser-pool.js';
+import { parseWorkerGroups, shouldStartWorker } from './worker-groups.js';
 
 const log = createLogger('worker');
 
 async function main() {
-  log.info('starting crawl workers');
-  const healthServer = startHealthServer();
-  const workers = [
-    startDiscoverConfigWorker(),
-    startDiscoverWorker(),
-    startFetchWorker(),
-    startExtractWorker(),
-    startMatchWorker(),
-    startCrawlHealthWorker(),
-    startDiscoverRepairWorker(),
-    startAnalyticsWorker(),
-    startReportsWorker(),
-  ];
+  const groups = parseWorkerGroups(process.argv);
+  log.info('starting workers', { groups: [...groups] });
 
-  if (process.env.REGISTER_SCHEDULES !== 'false') {
+  const healthServer = startHealthServer();
+  const workers: Worker[] = [];
+
+  if (shouldStartWorker(groups, 'discovery')) {
+    workers.push(startDiscoverConfigWorker(), startDiscoverRepairWorker());
+  }
+
+  if (shouldStartWorker(groups, 'crawl')) {
+    workers.push(
+      startDiscoverWorker(),
+      startFetchWorker(),
+      startExtractWorker(),
+      startMatchWorker(),
+      startCrawlHealthWorker(),
+      startAnalyticsWorker(),
+      startReportsWorker(),
+    );
+  }
+
+  if (
+    shouldStartWorker(groups, 'crawl') &&
+    process.env.REGISTER_SCHEDULES !== 'false'
+  ) {
     await registerSchedules().catch((err) =>
       log.error('failed to register schedules', { err: String(err) }),
     );
@@ -41,13 +55,14 @@ async function main() {
     healthServer?.close();
     await Promise.all(workers.map((w) => w.close()));
     await closeFetchers();
+    await closeBrowserPool();
     process.exit(0);
   };
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  log.info('workers ready', { count: workers.length });
+  log.info('workers ready', { count: workers.length, groups: [...groups] });
 }
 
 main().catch((err) => {

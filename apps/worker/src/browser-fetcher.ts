@@ -77,10 +77,15 @@ export class BrowserFetcher implements Fetcher {
     }
   }
 
-  async close(): Promise<void> {
+  /** Drop session state between discovery jobs (cookies, storage). */
+  async resetSession(): Promise<void> {
     await this.context?.close();
-    await this.browser?.close();
     this.context = null;
+  }
+
+  async close(): Promise<void> {
+    await this.resetSession();
+    await this.browser?.close();
     this.browser = null;
   }
 }

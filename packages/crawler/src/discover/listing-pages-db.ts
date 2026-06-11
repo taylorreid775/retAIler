@@ -1,4 +1,5 @@
-import { type ListingPagination } from '@retailer/schema';
+import { type CrawlRecipe, type ListingPagination, ListingPaginationSchema } from '@retailer/schema';
+import * as cheerio from 'cheerio';
 import { db, schema, eq, and } from '@retailer/db';
 import type { CategoryDirectory as DiscoveredDirectory } from './category-directory';
 
@@ -116,6 +117,82 @@ export function buildCategoryPath(
     cur = cur.parentId ? byId.get(cur.parentId) : undefined;
   }
   return path;
+}
+
+/** Discover listing page URLs from homepage HTML and agent-manifest hints. */
+export function discoverListingPageUrls(input: {
+  homepageUrl: string;
+  homepageHtml: string | null;
+  crawlRecipe: CrawlRecipe;
+}): { url: string; label: string }[] {
+  const listingPattern = input.crawlRecipe.listingUrlPattern ?? '/collections/';
+  const patternRe = new RegExp(
+    listingPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+    'i',
+  );
+  const origin = input.homepageUrl.replace(/\/$/, '');
+  const found = new Map<string, string>();
+
+  if (input.homepageHtml) {
+    const $ = cheerio.load(input.homepageHtml);
+    $('a[href]').each((_, el) => {
+      const href = $(el).attr('href');
+      if (!href) return;
+      try {
+        const url = new URL(href, origin).toString();
+        if (
+          patternRe.test(url) ||
+          /\/(collections?|categories|shop|browse)\//i.test(url)
+        ) {
+          const label = $(el).text().replace(/\s+/g, ' ').trim().slice(0, 120) || url;
+          found.set(url, label);
+        }
+      } catch {
+        // ignore bad href
+      }
+    });
+  }
+
+  if (found.size === 0) {
+    found.set(origin, 'Home');
+  }
+
+  return [...found.entries()].map(([url, label]) => ({ url, label }));
+}
+
+/** Upsert listing pages for listing_pages discovery mode. */
+export async function saveListingPageUrls(
+  retailerId: string,
+  pages: { url: string; label: string }[],
+  recipe: CrawlRecipe,
+): Promise<void> {
+  const pagination: ListingPagination =
+    recipe.jina?.pagination ?? ListingPaginationSchema.parse({ style: 'none' });
+  const productUrlPattern = recipe.productUrlPattern ?? recipe.jina?.productUrlPattern ?? null;
+  const now = new Date();
+
+  for (const page of pages) {
+    await db
+      .insert(schema.retailerListingPages)
+      .values({
+        retailerId,
+        url: page.url,
+        label: page.label,
+        pagination,
+        productUrlPattern,
+        discoveredAt: now,
+        active: true,
+      })
+      .onConflictDoUpdate({
+        target: [schema.retailerListingPages.retailerId, schema.retailerListingPages.url],
+        set: {
+          label: page.label,
+          pagination,
+          productUrlPattern,
+          active: true,
+        },
+      });
+  }
 }
 
 export type { DiscoveredDirectory as CategoryDirectory };

@@ -6,8 +6,8 @@ Maps the target architecture to the current RetAIler codebase. Use this when imp
 
 | Requirement | Built today | Needs building |
 |-------------|-------------|----------------|
-| Homepage URL onboarding | `store_onboarding`, dashboard `actions.ts` | Domain dedup, shared retailer model |
-| Platform fingerprinting | `detectPlatform()` (4 platforms) | Full fingerprint, 10+ platforms, bundle analysis |
+| Homepage URL onboarding | `store_onboarding`, dashboard `actions.ts` | — |
+| Platform fingerprinting | `detectPlatform()` + full fingerprint | Bundle analysis refinements |
 | Sitemap discovery | `discoverSite()` | Run parallel with API discovery |
 | Network sniff | `captureNetworkJson()` | Full request graph, header deps, HAR storage |
 | API recipe inference | `inferApiRecipeFromCaptures()` | Platform packs first, pagination auto-detect |
@@ -18,7 +18,7 @@ Maps the target architecture to the current RetAIler codebase. Use this when imp
 | Retailer knowledge reuse | `crawlRecipe` jsonb | Recipe versions, endpoint registry, doc reader |
 | Product normalization | `pipeline/ingest.ts` | No changes needed |
 | Matching | `pipeline/matching.ts` | No changes needed |
-| `listing_pages` mode | Schema only | Runtime adapter |
+| `listing_pages` mode | `createListingPagesAdapter` | Listing page refresh / drift |
 | Dashboard deep discovery | Worker only | Optional: surface stages in UI |
 
 ---
@@ -144,7 +144,7 @@ From `apps/worker/src/consumers/discover.ts` `resolveAdapter()`:
 | `api` | `createRecipeAdapter` | API JSON |
 | `jina_categories` | `createJinaAdapter` | Jina listing markdown |
 | `sitemap` | hand-written or `createGenericAdapter` | PDP URLs → fetch → extract |
-| `listing_pages` | **Not implemented** | — |
+| `listing_pages` | `createListingPagesAdapter` | HTML listing pages → direct ingest |
 
 ---
 

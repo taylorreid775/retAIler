@@ -4,6 +4,7 @@ import { db, schema, eq } from '@retailer/db';
 import {
   createGenericAdapter,
   createJinaAdapter,
+  createListingPagesAdapter,
   createRecipeAdapter,
   getAdapter,
   isAllowed,
@@ -32,6 +33,26 @@ async function resolveAdapter(retailer: RetailerRow): Promise<RetailerAdapter | 
   const parsed = retailer.crawlRecipe
     ? CrawlRecipeSchema.safeParse(retailer.crawlRecipe)
     : null;
+  if (parsed?.success && parsed.data.discoveryMode === 'listing_pages') {
+    const listingPages = await loadListingPages(retailer.id);
+    if (listingPages.length > 0) {
+      const adapter = createListingPagesAdapter({
+        key: retailer.key,
+        name: retailer.name,
+        domain: retailer.domain,
+        recipe: parsed.data,
+        listingPages,
+        retailerId: retailer.id,
+      });
+      registerAdapter(adapter);
+      log.info('using listing_pages crawl adapter', {
+        retailerKey: retailer.key,
+        listingPages: listingPages.length,
+      });
+      return adapter;
+    }
+    log.warn('listing_pages mode but no listing pages saved', { retailerKey: retailer.key });
+  }
   if (parsed?.success && parsed.data.discoveryMode === 'jina_categories') {
     const listingPages = await loadListingPages(retailer.id);
     if (listingPages.length > 0) {

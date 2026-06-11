@@ -119,6 +119,7 @@ export const retailers = pgTable(
   },
   (t) => ({
     keyIdx: uniqueIndex('retailers_key_idx').on(t.key),
+    domainIdx: uniqueIndex('retailers_domain_idx').on(t.domain),
   }),
 );
 
@@ -582,6 +583,8 @@ export const storeOnboarding = pgTable(
       .notNull()
       .references(() => orgs.id, { onDelete: 'cascade' }),
     inputUrl: text('input_url').notNull(),
+    /** Normalized host for cross-org dedup (no www., lowercase). */
+    normalizedDomain: text('normalized_domain'),
     status: onboardingStatusEnum('status').notNull().default('queued'),
     /** Set once discovery succeeds and a retailer row is created. */
     retailerId: uuid('retailer_id').references(() => retailers.id, { onDelete: 'set null' }),
@@ -593,6 +596,10 @@ export const storeOnboarding = pgTable(
   },
   (t) => ({
     orgTimeIdx: index('store_onboarding_org_time_idx').on(t.orgId, t.createdAt),
+    normalizedDomainStatusIdx: index('store_onboarding_normalized_domain_status_idx').on(
+      t.normalizedDomain,
+      t.status,
+    ),
   }),
 );
 

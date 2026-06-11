@@ -1,3 +1,4 @@
+export * from './domain';
 export * from './fetcher';
 export * from './robots';
 export * from './rate-limit';
@@ -24,6 +25,7 @@ export * from './discover/orchestrator';
 export * from './jina/fetcher';
 export * from './discover/category-directory';
 export * from './discover/listing-md';
+export * from './discover/listing-html';
 export * from './discover/pagination';
 export * from './discover/listing-pages-db';
 export * from './discover/health';

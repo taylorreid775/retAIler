@@ -3,6 +3,7 @@ import robotsParser from 'robots-parser';
 import { createLogger } from '@retailer/core';
 import type { CrawlRecipe } from '@retailer/schema';
 import { AGENT_FILE_CANDIDATES, buildCrawlRecipe, fetchAgentManifest } from './agent-manifest';
+import { deriveRetailerKey, normalizeRetailerDomain } from './domain.js';
 import { getSitemapChildren, walkSitemap } from './sitemap';
 import { extractFromJsonLd } from './extract/structured';
 
@@ -97,6 +98,7 @@ export async function discoverSite(
 
   const origin = resolveStoreOrigin(inputUrl);
   const host = new URL(origin).host;
+  const domain = normalizeRetailerDomain(host);
   const notes: string[] = [];
 
   // ── robots.txt: sitemaps + crawl delay ──
@@ -284,9 +286,9 @@ export async function discoverSite(
   });
 
   return {
-    key: slugifyHost(host),
+    key: deriveRetailerKey(domain),
     name: prettyName(host),
-    domain: host,
+    domain,
     homepageUrl: origin,
     sitemapUrl,
     sitemapUrls,
@@ -846,17 +848,8 @@ function absolute(href: string, origin: string): string {
   }
 }
 
-function slugifyHost(host: string): string {
-  return host
-    .replace(/^www\./i, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
-}
-
 function prettyName(host: string): string {
-  const base = host.replace(/^www\./i, '').split('.')[0] ?? host;
+  const base = normalizeRetailerDomain(host).split('.')[0] ?? host;
   return base.charAt(0).toUpperCase() + base.slice(1);
 }
 

@@ -13,6 +13,7 @@
     "kill": "pkill -9 -f 'RetAIler/apps/worker.*tsx' 2>/dev/null; pkill -9 -f 'RetAIler/apps/worker.*nodemon' 2>/dev/null; pkill -9 -f '@retailer/worker dev' 2>/dev/null; echo 'Worker processes stopped'",
     "lint": "echo \"(worker) no lint configured\"",
     "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx src/browser-pool.test.ts src/worker-groups.test.ts",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {

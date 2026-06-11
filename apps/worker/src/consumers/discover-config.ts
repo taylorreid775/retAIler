@@ -1,6 +1,6 @@
 import { Worker, type Job, queues, redisConnection } from '@retailer/jobs';
 import { createLogger } from '@retailer/core';
-import { db, schema, eq, or, count, writeRecipeVersion, desc } from '@retailer/db';
+import { db, schema, eq, or, count, writeRecipeVersion, desc, and, inArray, ne } from '@retailer/db';
 import {
   discoverSite,
   deriveProductPattern,
@@ -22,14 +22,17 @@ import {
   writeKnowledgeDocs,
   storeNetworkHar,
   saveRetailerEndpointsFromDiscovery,
+  discoverListingPageUrls,
+  saveListingPageUrls,
   type SiteDiscovery,
   type CategoryDirectoryResult,
   type CapturedRequest,
+  normalizeRetailerDomain,
 } from '@retailer/crawler';
 import { QueueName, PLAN_LIMITS, type DiscoverConfigJob, type RetailerFingerprint } from '@retailer/schema';
 import { createDiscoverFetchText } from '../discover-fetch.js';
-import { fetcherFor } from '../fetchers.js';
-import { BrowserFetcher } from '../browser-fetcher.js';
+import { getBrowserPool, resolveDiscoveryConcurrency } from '../browser-pool.js';
+import type { BrowserFetcher } from '../browser-fetcher.js';
 import { createApiFetchJson } from '../api-fetch.js';
 import { captureNetworkRequests } from '../network-capture.js';
 
@@ -52,11 +55,43 @@ function toDiscoveryView(d: SiteDiscovery) {
   };
 }
 
-async function markFailed(onboardingId: string, error: string, result?: unknown): Promise<void> {
+async function markFailed(
+  onboardingId: string,
+  error: string,
+  result?: unknown,
+  normalizedDomain?: string | null,
+): Promise<void> {
+  let domain = normalizedDomain ?? null;
+  if (!domain) {
+    const [row] = await db
+      .select({ normalizedDomain: schema.storeOnboarding.normalizedDomain })
+      .from(schema.storeOnboarding)
+      .where(eq(schema.storeOnboarding.id, onboardingId));
+    domain = row?.normalizedDomain ?? null;
+  }
+
   await db
     .update(schema.storeOnboarding)
     .set({ status: 'failed', error, result: result ?? null, updatedAt: new Date() })
     .where(eq(schema.storeOnboarding.id, onboardingId));
+
+  if (domain) {
+    await db
+      .update(schema.storeOnboarding)
+      .set({
+        status: 'failed',
+        error,
+        result: result ?? null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.storeOnboarding.normalizedDomain, domain),
+          inArray(schema.storeOnboarding.status, ['queued', 'discovering']),
+          ne(schema.storeOnboarding.id, onboardingId),
+        ),
+      );
+  }
 }
 
 /**
@@ -68,6 +103,9 @@ async function markFailed(onboardingId: string, error: string, result?: unknown)
  * single expensive browser instance.
  */
 export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
+  const pool = getBrowserPool();
+  const concurrency = resolveDiscoveryConcurrency(pool);
+
   return new Worker<DiscoverConfigJob>(
     QueueName.DiscoverConfig,
     async (job: Job<DiscoverConfigJob>) => {
@@ -86,57 +124,76 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         return;
       }
 
+      const inputUrl = onboarding.inputUrl;
+      const onboardingDomain = normalizeRetailerDomain(inputUrl);
+
       await db
         .update(schema.storeOnboarding)
-        .set({ status: 'discovering', updatedAt: new Date() })
+        .set({
+          status: 'discovering',
+          normalizedDomain: onboardingDomain,
+          updatedAt: new Date(),
+        })
         .where(eq(schema.storeOnboarding.id, onboardingId));
 
-      const inputUrl = onboarding.inputUrl;
+      await pool.runExclusive(async (browserFetcher) => {
+        // Onboarding always uses browser fallback — new stores are often behind
+        // Cloudflare/Akamai before we know their fetchStrategy.
+        const fetchText = createDiscoverFetchText({
+          fetchStrategy: 'browser',
+          log,
+          browserFetcher,
+        });
 
-      // Onboarding always uses browser fallback — new stores are often behind
-      // Cloudflare/Akamai before we know their fetchStrategy.
-      const fetchText = createDiscoverFetchText({ fetchStrategy: 'browser', log });
+        const useOrchestrator = process.env.DISCOVERY_ORCHESTRATOR === '1';
 
-      const useOrchestrator = process.env.DISCOVERY_ORCHESTRATOR === '1';
+        let discovery: SiteDiscovery;
+        let fingerprint: RetailerFingerprint;
+        let platformPackUsed = false;
+        let apiValidationReport: ApiRecipeValidation['report'] | null = null;
+        let networkCaptures: CapturedRequest[] | undefined;
 
-      let discovery: SiteDiscovery;
-      let fingerprint: RetailerFingerprint;
-      let platformPackUsed = false;
-      let apiValidationReport: ApiRecipeValidation['report'] | null = null;
-      let networkCaptures: CapturedRequest[] | undefined;
-
-      try {
-        if (useOrchestrator) {
-          const orch = await runParallelDiscoveryStages(inputUrl, fetchText, {
-            tryPlatformPack: tryPlatformPackDiscovery,
-          });
-          discovery = orch.discovery;
-          fingerprint = orch.fingerprint;
-          platformPackUsed = orch.platformPackUsed;
-          apiValidationReport = orch.apiValidationReport;
-          log.info('orchestrator parallel discovery', {
-            onboardingId,
-            selected: platformPackUsed ? 'platform_pack' : 'static_site',
-            notes: orch.notes,
-          });
-        } else {
-          discovery = await discoverSite(inputUrl, { fetchText });
-          fingerprint = fingerprintSite({
-            domain: discovery.domain,
-            homepageUrl: discovery.homepageUrl,
-            homepageHtml: discovery.homepageHtml,
-            agentUrls: discovery.crawlRecipe.sampleProductUrls,
-          });
-          const platformPackResult = await tryPlatformPackDiscovery(discovery, fingerprint);
-          discovery = platformPackResult.discovery;
-          platformPackUsed = platformPackResult.used;
-          if (platformPackResult.validationReport) {
-            apiValidationReport = platformPackResult.validationReport;
+        try {
+          if (useOrchestrator) {
+            const orch = await runParallelDiscoveryStages(inputUrl, fetchText, {
+              tryPlatformPack: (d, f) => tryPlatformPackDiscovery(d, f, browserFetcher),
+            });
+            discovery = orch.discovery;
+            fingerprint = orch.fingerprint;
+            platformPackUsed = orch.platformPackUsed;
+            apiValidationReport = orch.apiValidationReport;
+            log.info('orchestrator parallel discovery', {
+              onboardingId,
+              selected: platformPackUsed ? 'platform_pack' : 'static_site',
+              notes: orch.notes,
+            });
+          } else {
+            discovery = await discoverSite(inputUrl, { fetchText });
+            fingerprint = fingerprintSite({
+              domain: discovery.domain,
+              homepageUrl: discovery.homepageUrl,
+              homepageHtml: discovery.homepageHtml,
+              agentUrls: discovery.crawlRecipe.sampleProductUrls,
+            });
+            const platformPackResult = await tryPlatformPackDiscovery(
+              discovery,
+              fingerprint,
+              browserFetcher,
+            );
+            discovery = platformPackResult.discovery;
+            platformPackUsed = platformPackResult.used;
+            if (platformPackResult.validationReport) {
+              apiValidationReport = platformPackResult.validationReport;
+            }
           }
-        }
-      } catch (err) {
+        } catch (err) {
         log.error('discovery threw', { onboardingId, inputUrl, err: String(err) });
-        await markFailed(onboardingId, `Could not analyze that site: ${String(err)}`);
+        await markFailed(
+          onboardingId,
+          `Could not analyze that site: ${String(err)}`,
+          undefined,
+          onboardingDomain,
+        );
         return;
       }
 
@@ -187,7 +244,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       const needsApiSniff = !hasValidatedApiEndpoint;
 
       if (needsApiSniff) {
-        const networkResult = await tryNetworkApiDiscovery(inputUrl, discovery);
+        const networkResult = await tryNetworkApiDiscovery(inputUrl, discovery, browserFetcher);
         discovery = networkResult.discovery;
         if (networkResult.validationReport) {
           apiValidationReport = networkResult.validationReport;
@@ -239,16 +296,22 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           msg =
             'Sports Experts blocks automated access (Incapsula). We cannot sniff their catalog API yet.';
         }
-        await markFailed(onboardingId, msg + (discovery.notes ? ` (${discovery.notes})` : ''), view);
+        await markFailed(
+          onboardingId,
+          msg + (discovery.notes ? ` (${discovery.notes})` : ''),
+          view,
+          onboardingDomain,
+        );
         return;
       }
 
       // Re-check dedupe: another path may have created this retailer meanwhile.
+      const normalizedDomain = normalizeRetailerDomain(discovery.domain);
       const [existing] = await db
         .select()
         .from(schema.retailers)
         .where(
-          or(eq(schema.retailers.key, discovery.key), eq(schema.retailers.domain, discovery.domain)),
+          or(eq(schema.retailers.key, discovery.key), eq(schema.retailers.domain, normalizedDomain)),
         );
 
       let retailerId: string;
@@ -264,6 +327,9 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
                 fetchStrategy: discovery.fetchStrategy,
                 productUrlPattern: discovery.productUrlPattern,
                 discoveryNotes: discovery.notes,
+                crawlRecipe: discovery.crawlRecipe,
+                fingerprint,
+                discoveryConfidence: discovery.confidence,
                 updatedAt: new Date(),
               })
               .where(eq(schema.retailers.id, retailerId));
@@ -307,6 +373,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
             onboardingId,
             `Your ${plan} plan allows ${maxCompetitors} competitors. Upgrade to add this store.`,
             view,
+            normalizedDomain,
           );
           return;
         }
@@ -317,7 +384,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
             .values({
               key: discovery.key,
               name: discovery.name,
-              domain: discovery.domain,
+              domain: normalizedDomain,
               country: 'CA',
               source: 'user',
               enabled: true,
@@ -354,7 +421,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           return { id: row.id, version };
         });
         if (!created) {
-          await markFailed(onboardingId, 'Failed to create the store record', view);
+          await markFailed(onboardingId, 'Failed to create the store record', view, normalizedDomain);
           return;
         }
         retailerId = created.id;
@@ -367,6 +434,16 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           retailerId,
           count: jinaResult.directory.categories.length,
         });
+      }
+
+      if (discovery.crawlRecipe.discoveryMode === 'listing_pages') {
+        const listingUrls = discoverListingPageUrls({
+          homepageUrl: discovery.homepageUrl,
+          homepageHtml: discovery.homepageHtml,
+          crawlRecipe: discovery.crawlRecipe,
+        });
+        await saveListingPageUrls(retailerId, listingUrls, discovery.crawlRecipe);
+        log.info('saved listing_pages rows', { retailerId, count: listingUrls.length });
       }
 
       if (hasApiRecipe) {
@@ -388,6 +465,8 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         .insert(schema.orgCompetitors)
         .values({ orgId: onboarding.orgId, retailerId })
         .onConflictDoNothing();
+
+      await finalizeWaitingOnboardings(normalizedDomain, retailerId, view);
 
       try {
         const docsDir = await writeKnowledgeDocs({
@@ -432,21 +511,78 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         key: discovery.key,
         fetchStrategy: discovery.fetchStrategy,
       });
+      }); // end runExclusive
     },
-    { connection: redisConnection(), concurrency: 1 },
+    { connection: redisConnection(), concurrency },
   );
+}
+
+/** Link other orgs waiting on the same domain discovery to the new retailer. */
+async function finalizeWaitingOnboardings(
+  normalizedDomain: string,
+  retailerId: string,
+  result: ReturnType<typeof toDiscoveryView>,
+): Promise<void> {
+  const waiting = await db
+    .select({ id: schema.storeOnboarding.id, orgId: schema.storeOnboarding.orgId })
+    .from(schema.storeOnboarding)
+    .where(
+      and(
+        eq(schema.storeOnboarding.normalizedDomain, normalizedDomain),
+        inArray(schema.storeOnboarding.status, ['queued', 'discovering']),
+      ),
+    );
+
+  for (const row of waiting) {
+    const [org] = await db
+      .select({ plan: schema.orgs.plan })
+      .from(schema.orgs)
+      .where(eq(schema.orgs.id, row.orgId));
+    const plan = org?.plan ?? 'trial';
+    const [{ value: trackedCount } = { value: 0 }] = await db
+      .select({ value: count() })
+      .from(schema.orgCompetitors)
+      .where(eq(schema.orgCompetitors.orgId, row.orgId));
+    const maxCompetitors = PLAN_LIMITS[plan].maxCompetitors;
+    if (trackedCount >= maxCompetitors) {
+      await db
+        .update(schema.storeOnboarding)
+        .set({
+          status: 'failed',
+          error: `Your ${plan} plan allows ${maxCompetitors} competitors. Upgrade to add this store.`,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.storeOnboarding.id, row.id));
+      continue;
+    }
+
+    await db
+      .insert(schema.orgCompetitors)
+      .values({ orgId: row.orgId, retailerId })
+      .onConflictDoNothing();
+    await db
+      .update(schema.storeOnboarding)
+      .set({
+        status: 'ready',
+        retailerId,
+        result,
+        error: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.storeOnboarding.id, row.id));
+  }
 }
 
 /** Phase A: deterministic platform pack probes before Jina/network sniff. */
 async function tryPlatformPackDiscovery(
   discovery: SiteDiscovery,
   fingerprint: RetailerFingerprint,
+  browserFetcher: BrowserFetcher,
 ): Promise<{ discovery: SiteDiscovery; used: boolean; validationReport?: ApiRecipeValidation['report'] }> {
   if (fingerprint.platformConfidence < 0.5 || fingerprint.recommendedStrategy !== 'platform_pack') {
     return { discovery, used: false };
   }
 
-  const browserFetcher = fetcherFor('browser') as BrowserFetcher;
   const strategies: Array<'static' | 'browser'> = ['static', 'browser'];
 
   for (const fetchStrategy of strategies) {
@@ -514,13 +650,13 @@ async function tryPlatformPackDiscovery(
 async function validateRecipeWithTransport(
   discovery: SiteDiscovery,
   crawlRecipe: SiteDiscovery['crawlRecipe'],
+  browserFetcher: BrowserFetcher,
 ): Promise<{
   ok: boolean;
   validation: ApiRecipeValidation;
   fetchStrategy: 'static' | 'browser';
   fetchJson: ReturnType<typeof createApiFetchJson>;
 } | null> {
-  const browserFetcher = fetcherFor('browser') as BrowserFetcher;
   let last: ApiRecipeValidation | null = null;
   for (const fetchStrategy of ['static', 'browser'] as const) {
     const fetchJson = createApiFetchJson({ fetchStrategy, browserFetcher });
@@ -539,6 +675,7 @@ async function validateRecipeWithTransport(
 async function tryNetworkApiDiscovery(
   inputUrl: string,
   discovery: SiteDiscovery,
+  browserFetcher: BrowserFetcher,
 ): Promise<{
   discovery: SiteDiscovery;
   validationReport?: ApiRecipeValidation['report'];
@@ -580,7 +717,7 @@ async function tryNetworkApiDiscovery(
     discovery.sampleProductUrls,
   );
 
-  const validated = await validateRecipeWithTransport(discovery, draft.crawlRecipe);
+  const validated = await validateRecipeWithTransport(discovery, draft.crawlRecipe, browserFetcher);
   if (!validated?.ok) {
     log.warn('inferred API recipe failed validation', {
       key: discovery.key,

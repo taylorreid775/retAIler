@@ -106,7 +106,9 @@ normalizeUrl(input) → domain
 - Populate retailer catalog via first `crawl-discover` job
 - Schedule recurring refreshes via existing scheduler
 
-**Implementation note:** Domain-level dedup and shared-retailer model need to be added. Today `store_onboarding` is per-org; one discovery should serve all orgs monitoring the same domain.
+**Implementation note:** Domain-level dedup links orgs to shared `retailers` rows via
+`normalizeRetailerDomain()` and `org_competitors`. One discovery serves all orgs
+monitoring the same domain.
 
 ## Current Pipeline (Baseline)
 

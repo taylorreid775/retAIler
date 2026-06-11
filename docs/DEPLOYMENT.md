@@ -25,10 +25,17 @@ pnpm db:seed                    # Sport Chek, MEC, Sporting Life
 ```bash
 docker build -f apps/worker/Dockerfile -t retailer-worker .
 docker run --env-file .env -p 8080:8080 retailer-worker
+# Or split pools locally:
+# tsx apps/worker/src/index.ts --workers=crawl
+# tsx apps/worker/src/index.ts --workers=discovery
 ```
 
-The worker registers repeatable schedules on boot (daily crawls per retailer +
-daily analytics + weekly reports). Disable with `REGISTER_SCHEDULES=false`.
+On Fly.io, use separate process groups (`crawl` and `discovery`) defined in
+`apps/worker/fly.toml`. Discovery machines run Playwright onboarding;
+crawl machines consume fetch/extract/match queues and register schedules.
+Set `BROWSER_POOL_SIZE` and `DISCOVERY_CONCURRENCY` on discovery machines.
+`DISCOVERY_CONCURRENCY` is capped to `BROWSER_POOL_SIZE` so each concurrent job
+gets an exclusive Playwright context (session reset between jobs).
 Health/metrics: `GET :8080/health`, `GET :8080/metrics`.
 
 ## Stripe webhook

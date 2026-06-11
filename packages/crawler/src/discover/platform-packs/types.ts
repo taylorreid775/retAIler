@@ -9,14 +9,18 @@ export interface ProbeContext {
   origin: string;
   domain: string;
   homepageHtml: string | null;
-  fetchJson: (url: string, headers?: Record<string, string>) => Promise<unknown | null>;
+  fetchJson: (
+    url: string,
+    headers?: Record<string, string>,
+    init?: { method?: 'GET' | 'POST'; body?: string },
+  ) => Promise<unknown | null>;
 }
 
 export interface ProbeDefinition {
   url: string | ((ctx: ProbeContext) => string);
   method: 'GET' | 'POST';
-  headers?: Record<string, string>;
-  body?: string;
+  headers?: Record<string, string> | ((ctx: ProbeContext) => Record<string, string>);
+  body?: string | ((ctx: ProbeContext) => string);
   successCheck: (response: ProbeResponse) => boolean;
 }
 

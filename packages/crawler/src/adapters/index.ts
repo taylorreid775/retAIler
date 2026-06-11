@@ -26,4 +26,5 @@ export * from './types';
 export * from './generic';
 export * from './recipe-adapter';
 export * from './jina-adapter';
+export * from './listing-pages-adapter';
 export * from './sportchek-api';

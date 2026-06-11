@@ -1,9 +1,10 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { db, schema, eq, and, or, desc, inArray, writeRecipeVersion } from '@retailer/db';
-import { discoverSite, fingerprintSite } from '@retailer/crawler';
+import { db, schema, eq, and, or, desc, inArray, ne, count, writeRecipeVersion } from '@retailer/db';
+import { discoverSite, fingerprintSite, deriveRetailerKey, normalizeRetailerDomain, discoverListingPageUrls, saveListingPageUrls } from '@retailer/crawler';
 import { queues } from '@retailer/jobs';
+import { PLAN_LIMITS } from '@retailer/schema';
 import { getTenant } from '@/lib/tenant';
 import { isDevCrawlNowEnabled } from '@/lib/dev-flags';
 
@@ -96,12 +97,13 @@ export async function startAddStoreByUrl(rawUrl: string): Promise<StartAddStoreR
   const parsed = normalizeStoreUrl(rawUrl);
   if ('error' in parsed) return { error: parsed.error };
   const { input, host } = parsed;
-  const key = slugifyHost(host);
+  const domain = normalizeRetailerDomain(host);
+  const key = deriveRetailerKey(domain);
 
   const [existing] = await db
     .select()
     .from(schema.retailers)
-    .where(or(eq(schema.retailers.key, key), eq(schema.retailers.domain, host)));
+    .where(or(eq(schema.retailers.key, key), eq(schema.retailers.domain, domain)));
   if (existing) {
     if (tenant.competitorRetailerIds.includes(existing.id)) {
       return { trackedExisting: true };
@@ -126,6 +128,43 @@ export async function startAddStoreByUrl(rawUrl: string): Promise<StartAddStoreR
     };
   }
 
+  // Another org may already be discovering this domain — avoid duplicate work.
+  const [globalInFlight] = await db
+    .select({
+      id: schema.storeOnboarding.id,
+      retailerId: schema.storeOnboarding.retailerId,
+    })
+    .from(schema.storeOnboarding)
+    .where(
+      and(
+        eq(schema.storeOnboarding.normalizedDomain, domain),
+        inArray(schema.storeOnboarding.status, ['queued', 'discovering']),
+      ),
+    )
+    .limit(1);
+  if (globalInFlight) {
+    if (globalInFlight.retailerId) {
+      const linked = await linkOrgToRetailer(tenant, globalInFlight.retailerId);
+      if (linked.error) return linked;
+      revalidatePath('/competitors');
+      revalidatePath('/');
+      return { trackedExisting: true };
+    }
+    const [waiting] = await db
+      .insert(schema.storeOnboarding)
+      .values({
+        orgId: tenant.org.id,
+        inputUrl: input,
+        normalizedDomain: domain,
+        status: 'queued',
+      })
+      .returning({ id: schema.storeOnboarding.id });
+    if (!waiting) return { error: 'Failed to start store onboarding' };
+    revalidatePath('/competitors');
+    revalidatePath('/');
+    return { onboardingId: waiting.id, inputUrl: input };
+  }
+
   // Re-use an in-flight onboarding for the same URL instead of duplicating.
   const [inFlight] = await db
     .select({ id: schema.storeOnboarding.id })
@@ -146,6 +185,7 @@ export async function startAddStoreByUrl(rawUrl: string): Promise<StartAddStoreR
     .values({
       orgId: tenant.org.id,
       inputUrl: input,
+      normalizedDomain: domain,
       status: 'discovering',
     })
     .returning({ id: schema.storeOnboarding.id });
@@ -178,6 +218,25 @@ export async function processAddStoreByUrl(onboardingId: string): Promise<AddSto
   }
 
   const input = onboarding.inputUrl;
+  const domain = onboarding.normalizedDomain ?? normalizeRetailerDomain(input);
+
+  // Wait for another org's in-flight discovery — do not enqueue duplicate work.
+  if (onboarding.status === 'queued') {
+    const [otherOrgDiscovering] = await db
+      .select({ id: schema.storeOnboarding.id })
+      .from(schema.storeOnboarding)
+      .where(
+        and(
+          eq(schema.storeOnboarding.normalizedDomain, domain),
+          inArray(schema.storeOnboarding.status, ['discovering']),
+          ne(schema.storeOnboarding.id, onboardingId),
+        ),
+      )
+      .limit(1);
+    if (otherOrgDiscovering) {
+      return { pending: true };
+    }
+  }
 
   let discovery: Awaited<ReturnType<typeof discoverSite>> | null = null;
   try {
@@ -210,16 +269,37 @@ export async function addStoreByUrl(rawUrl: string): Promise<AddStoreResult> {
   return processAddStoreByUrl(start.onboardingId);
 }
 
+async function linkOrgToRetailer(
+  tenant: NonNullable<Awaited<ReturnType<typeof getTenant>>>,
+  retailerId: string,
+): Promise<{ error?: string }> {
+  if (tenant.competitorRetailerIds.includes(retailerId)) return {};
+  if (tenant.competitorRetailerIds.length >= tenant.limits.maxCompetitors) {
+    return {
+      error: `This store already exists, but your ${tenant.org.plan} plan allows ${tenant.limits.maxCompetitors} competitors. Upgrade to track more.`,
+    };
+  }
+  await db
+    .insert(schema.orgCompetitors)
+    .values({ orgId: tenant.org.id, retailerId })
+    .onConflictDoNothing();
+  return {};
+}
+
 async function handOffToWorker(
   onboardingId: string,
   discovery: Awaited<ReturnType<typeof discoverSite>> | null,
 ): Promise<AddStoreResult> {
   const view = discovery ? toDiscoveryView(discovery) : null;
+  const normalizedDomain = discovery
+    ? normalizeRetailerDomain(discovery.domain)
+    : undefined;
   await db
     .update(schema.storeOnboarding)
     .set({
       status: 'queued',
       result: view,
+      normalizedDomain,
       updatedAt: new Date(),
     })
     .where(eq(schema.storeOnboarding.id, onboardingId));
@@ -244,6 +324,7 @@ async function promoteDiscoveredStore(
   discovery: Awaited<ReturnType<typeof discoverSite>>,
 ): Promise<AddStoreResult> {
   const view = toDiscoveryView(discovery);
+  const normalizedDomain = normalizeRetailerDomain(discovery.domain);
   const fingerprint = fingerprintSite({
     domain: discovery.domain,
     homepageUrl: discovery.homepageUrl,
@@ -251,13 +332,74 @@ async function promoteDiscoveredStore(
     agentUrls: discovery.crawlRecipe.sampleProductUrls,
   });
 
+  const [existing] = await db
+    .select()
+    .from(schema.retailers)
+    .where(
+      or(eq(schema.retailers.key, discovery.key), eq(schema.retailers.domain, normalizedDomain)),
+    );
+  if (existing) {
+    const [org] = await db
+      .select({ plan: schema.orgs.plan })
+      .from(schema.orgs)
+      .where(eq(schema.orgs.id, orgId));
+    const plan = org?.plan ?? 'trial';
+    const [{ value: trackedCount } = { value: 0 }] = await db
+      .select({ value: count() })
+      .from(schema.orgCompetitors)
+      .where(eq(schema.orgCompetitors.orgId, orgId));
+    const limit = PLAN_LIMITS[plan].maxCompetitors;
+
+    const [alreadyTracked] = await db
+      .select({ retailerId: schema.orgCompetitors.retailerId })
+      .from(schema.orgCompetitors)
+      .where(
+        and(
+          eq(schema.orgCompetitors.orgId, orgId),
+          eq(schema.orgCompetitors.retailerId, existing.id),
+        ),
+      )
+      .limit(1);
+    if (!alreadyTracked && trackedCount >= limit) {
+      await markOnboardingFailed(
+        onboardingId,
+        `This store already exists, but your ${plan} plan allows ${limit} competitors. Upgrade to track more.`,
+      );
+      revalidatePath('/competitors');
+      revalidatePath('/');
+      return {
+        error: `This store already exists, but your ${plan} plan allows ${limit} competitors. Upgrade to track more.`,
+      };
+    }
+
+    await db
+      .insert(schema.orgCompetitors)
+      .values({ orgId, retailerId: existing.id })
+      .onConflictDoNothing();
+    await db
+      .update(schema.storeOnboarding)
+      .set({
+        status: 'ready',
+        retailerId: existing.id,
+        result: view,
+        error: null,
+        normalizedDomain,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.storeOnboarding.id, onboardingId));
+
+    revalidatePath('/competitors');
+    revalidatePath('/');
+    return { trackedExisting: true, discovery: view };
+  }
+
   const [retailer] = await db.transaction(async (tx) => {
     const [row] = await tx
       .insert(schema.retailers)
       .values({
         key: discovery.key,
         name: discovery.name,
-        domain: discovery.domain,
+        domain: normalizedDomain,
         country: 'CA',
         source: 'user',
         enabled: true,
@@ -294,6 +436,15 @@ async function promoteDiscoveredStore(
     revalidatePath('/competitors');
     revalidatePath('/');
     return { error: 'Failed to create the store record' };
+  }
+
+  if (discovery.crawlRecipe.discoveryMode === 'listing_pages') {
+    const listingUrls = discoverListingPageUrls({
+      homepageUrl: discovery.homepageUrl,
+      homepageHtml: discovery.homepageHtml,
+      crawlRecipe: discovery.crawlRecipe,
+    });
+    await saveListingPageUrls(retailer.id, listingUrls, discovery.crawlRecipe);
   }
 
   await db
@@ -339,15 +490,6 @@ function toDiscoveryView(d: Awaited<ReturnType<typeof discoverSite>>): AddStoreR
     crawlRecipe: d.crawlRecipe,
     notes: d.notes,
   };
-}
-
-function slugifyHost(host: string): string {
-  return host
-    .replace(/^www\./i, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
 }
 
 /**
