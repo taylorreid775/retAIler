@@ -10,6 +10,9 @@ import {
   mergeApiIntoDiscovery,
   saveListingPages,
   validateApiRecipe,
+  PROMOTION_MIN_CONFIDENCE,
+  mergeReplayContextFromCapture,
+  selectCaptureForReplay,
   type ApiRecipeValidation,
   fingerprintSite,
   runPlatformPack,
@@ -17,15 +20,18 @@ import {
   crawlRecipePlatformFromFingerprint,
   runParallelDiscoveryStages,
   writeKnowledgeDocs,
+  storeNetworkHar,
+  saveRetailerEndpointsFromDiscovery,
   type SiteDiscovery,
   type CategoryDirectoryResult,
+  type CapturedRequest,
 } from '@retailer/crawler';
 import { QueueName, PLAN_LIMITS, type DiscoverConfigJob, type RetailerFingerprint } from '@retailer/schema';
 import { createDiscoverFetchText } from '../discover-fetch.js';
 import { fetcherFor } from '../fetchers.js';
 import { BrowserFetcher } from '../browser-fetcher.js';
 import { createApiFetchJson } from '../api-fetch.js';
-import { captureNetworkJson } from '../network-capture.js';
+import { captureNetworkRequests } from '../network-capture.js';
 
 const log = createLogger('worker:discover-config');
 
@@ -97,6 +103,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       let fingerprint: RetailerFingerprint;
       let platformPackUsed = false;
       let apiValidationReport: ApiRecipeValidation['report'] | null = null;
+      let networkCaptures: CapturedRequest[] | undefined;
 
       try {
         if (useOrchestrator) {
@@ -174,9 +181,10 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         }
       }
 
-      // Sniff XHR/fetch only when HTML/sitemap discovery failed — saves time + AI credits.
-      const needsApiSniff =
-        !platformPackUsed && !jinaResult && (discovery.confidence <= 0 || !discovery.productUrlPattern);
+      // Stage 2 network sniff when no validated API endpoint meets promotion threshold.
+      const hasValidatedApiEndpoint =
+        apiValidationReport != null && apiValidationReport.confidence >= PROMOTION_MIN_CONFIDENCE;
+      const needsApiSniff = !hasValidatedApiEndpoint;
 
       if (needsApiSniff) {
         const networkResult = await tryNetworkApiDiscovery(inputUrl, discovery);
@@ -184,6 +192,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         if (networkResult.validationReport) {
           apiValidationReport = networkResult.validationReport;
         }
+        networkCaptures = networkResult.captures;
       }
 
       const effectivePattern =
@@ -360,6 +369,21 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         });
       }
 
+      if (hasApiRecipe) {
+        try {
+          await saveRetailerEndpointsFromDiscovery(retailerId, discovery.crawlRecipe, {
+            validationReport: apiValidationReport,
+            captures: networkCaptures,
+          });
+          log.info('saved retailer endpoints', { retailerId, key: discovery.key });
+        } catch (err) {
+          log.warn('failed to save retailer endpoints', {
+            retailerId,
+            err: String(err),
+          });
+        }
+      }
+
       await db
         .insert(schema.orgCompetitors)
         .values({ orgId: onboarding.orgId, retailerId })
@@ -447,6 +471,7 @@ async function tryPlatformPackDiscovery(
     );
 
     const validation = await validateApiRecipe(draft.crawlRecipe, discovery.key, fetchJson, 3);
+    const validatedRecipe = validation.recipe ?? draft.crawlRecipe;
     if (!validation.ok) {
       log.warn('platform pack recipe failed validation', {
         key: discovery.key,
@@ -465,10 +490,11 @@ async function tryPlatformPackDiscovery(
       confidence: validation.report.confidence,
     });
 
+    const validatedApi = validatedRecipe.api ?? packResult.api;
     return {
       discovery: mergePlatformPackIntoDiscovery(
         discovery,
-        packResult.api,
+        validatedApi,
         packResult.productUrlPattern,
         validation.samples.map((s) => s.sourceUrl),
         crawlRecipePlatformFromFingerprint(fingerprint),
@@ -513,13 +539,24 @@ async function validateRecipeWithTransport(
 async function tryNetworkApiDiscovery(
   inputUrl: string,
   discovery: SiteDiscovery,
-): Promise<{ discovery: SiteDiscovery; validationReport?: ApiRecipeValidation['report'] }> {
+): Promise<{
+  discovery: SiteDiscovery;
+  validationReport?: ApiRecipeValidation['report'];
+  captures?: CapturedRequest[];
+}> {
   log.info('network API sniff starting', { inputUrl, key: discovery.key });
 
-  const captures = await captureNetworkJson(inputUrl);
+  const captures = await captureNetworkRequests(inputUrl);
   if (!captures.length) {
     log.info('network API sniff found no product-like JSON', { inputUrl });
     return { discovery };
+  }
+
+  try {
+    const har = await storeNetworkHar(discovery.key, captures);
+    log.info('network HAR exported', { key: discovery.key, blobKey: har.blobKey, url: har.url });
+  } catch (err) {
+    log.warn('network HAR export failed', { key: discovery.key, err: String(err) });
   }
 
   const inferred = await inferApiRecipeFromCaptures(captures, {
@@ -528,12 +565,17 @@ async function tryNetworkApiDiscovery(
   });
   if (!inferred) {
     log.warn('network API sniff could not infer recipe', { inputUrl, captures: captures.length });
-    return { discovery };
+    return { discovery, captures };
   }
+
+  const replayCapture = selectCaptureForReplay(captures, inferred.api.baseUrl);
+  const apiWithReplay = replayCapture
+    ? mergeReplayContextFromCapture(inferred.api, replayCapture)
+    : inferred.api;
 
   const draft = mergeApiIntoDiscovery(
     discovery,
-    inferred.api,
+    apiWithReplay,
     inferred.productUrlPattern,
     discovery.sampleProductUrls,
   );
@@ -544,19 +586,26 @@ async function tryNetworkApiDiscovery(
       key: discovery.key,
       failureModes: validated?.validation.report.failureModes,
     });
-    return { discovery };
+    return { discovery, captures };
+  }
+
+  const finalRecipe = validated.validation.recipe ?? draft.crawlRecipe;
+  let finalApi = finalRecipe.api ?? apiWithReplay;
+  if (replayCapture) {
+    finalApi = mergeReplayContextFromCapture(finalApi, replayCapture);
   }
 
   log.info('network API recipe validated', {
     key: discovery.key,
     products: validated.validation.count,
-    endpoint: inferred.api.baseUrl,
+    endpoint: finalApi.baseUrl,
     fetchStrategy: validated.fetchStrategy,
+    pagination: finalApi.pagination.style,
   });
 
   const merged = mergeApiIntoDiscovery(
     discovery,
-    inferred.api,
+    finalApi,
     inferred.productUrlPattern,
     validated.validation.samples.map((s) => s.sourceUrl),
   );
@@ -567,12 +616,14 @@ async function tryNetworkApiDiscovery(
       fetchStrategy: validated.fetchStrategy,
       confidence: validated.validation.report.confidence,
       crawlRecipe: {
-        ...merged.crawlRecipe,
+        ...finalRecipe,
+        api: finalApi,
         fetchStrategy: validated.fetchStrategy,
         confidence: validated.validation.report.confidence,
       },
     },
     validationReport: validated.validation.report,
+    captures,
   };
 }
 

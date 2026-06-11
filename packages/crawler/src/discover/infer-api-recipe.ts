@@ -8,7 +8,7 @@ import {
   type CrawlRecipe,
 } from '@retailer/schema';
 import { z } from 'zod';
-import { type CapturedJsonResponse } from './network-types';
+import { type CapturedJsonResponse, toCapturedJsonResponse, type CapturedRequest } from './network-types';
 
 const log = createLogger('crawler:infer-api');
 
@@ -31,25 +31,53 @@ const SAFE_HEADER_DENY = /^(cookie|authorization|set-cookie)$/i;
  * Use AI Gateway to turn captured network traffic into a replayable ApiRecipe.
  * Returns null when inference fails or the result does not validate.
  */
+function normalizeCaptures(
+  captures: CapturedJsonResponse[] | CapturedRequest[],
+): CapturedJsonResponse[] {
+  if (!captures.length) return [];
+  const first = captures[0]!;
+  if ('requestUrl' in first) {
+    return captures as CapturedJsonResponse[];
+  }
+  return (captures as CapturedRequest[]).map(toCapturedJsonResponse);
+}
+
 export async function inferApiRecipeFromCaptures(
-  captures: CapturedJsonResponse[],
+  captures: CapturedJsonResponse[] | CapturedRequest[],
   ctx: { domain: string; homepageUrl: string },
 ): Promise<{ api: ApiRecipe; productUrlPattern: string | null } | null> {
-  const ranked = captures
+  const ranked = normalizeCaptures(captures)
     .filter((c) => c.productLikeScore >= 0.4)
     .sort((a, b) => b.productLikeScore - a.productLikeScore)
     .slice(0, 5);
   if (!ranked.length) return null;
 
+  const extendedByUrl = new Map<string, CapturedRequest>();
+  if (captures[0] && !('requestUrl' in captures[0])) {
+    for (const capture of captures as CapturedRequest[]) {
+      extendedByUrl.set(capture.url, capture);
+    }
+  }
+
   const prompt = ranked
-    .map(
-      (c, i) =>
+    .map((c, i) => {
+      const ext = extendedByUrl.get(c.requestUrl);
+      const graphqlLine = ext?.graphqlOperationName
+        ? `GraphQL operation: ${ext.graphqlOperationName}\n`
+        : '';
+      const depsLine = ext?.dependsOn?.length
+        ? `Depends on: ${ext.dependsOn.join(', ')}\n`
+        : '';
+      return (
         `### Capture ${i + 1} (score ${c.productLikeScore.toFixed(2)})\n` +
         `Page: ${c.pageUrl}\n` +
         `Request: ${c.method} ${c.requestUrl}\n` +
+        graphqlLine +
+        depsLine +
         `Headers: ${JSON.stringify(c.requestHeaders, null, 0)}\n` +
-        `Response preview:\n${c.bodyPreview}\n`,
-    )
+        `Response preview:\n${c.bodyPreview}\n`
+      );
+    })
     .join('\n');
 
   try {

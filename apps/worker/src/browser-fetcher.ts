@@ -32,8 +32,19 @@ export class BrowserFetcher implements Fetcher {
 
   /** API request via Playwright (bypasses Akamai TLS fingerprint blocks on plain fetch). */
   async fetchJson(url: string, headers: Record<string, string>): Promise<{ status: number; text: string }> {
+    return this.fetchApi(url, { headers, method: 'GET' });
+  }
+
+  async fetchApi(
+    url: string,
+    opts: { headers: Record<string, string>; method?: 'GET' | 'POST'; body?: string },
+  ): Promise<{ status: number; text: string }> {
     const context = await this.ensure();
-    const response = await context.request.get(url, { headers });
+    const method = opts.method ?? 'GET';
+    const response =
+      method === 'POST'
+        ? await context.request.post(url, { headers: opts.headers, data: opts.body })
+        : await context.request.get(url, { headers: opts.headers });
     return { status: response.status(), text: await response.text() };
   }
 

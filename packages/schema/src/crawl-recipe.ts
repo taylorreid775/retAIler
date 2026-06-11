@@ -3,10 +3,17 @@ import { CurrencySchema } from './common';
 
 /** Pagination settings for API-based catalog discovery. */
 export const ApiPaginationSchema = z.object({
-  /** `page` increments 1,2,3…; `offset` uses (page-1)*itemsPerPage for start/offset params. */
-  style: z.enum(['page', 'offset']).default('page'),
+  /**
+   * `page` increments 1,2,3…; `offset` uses (page-1)*itemsPerPage;
+   * `cursor` reads endCursor from prior response; `link_rel` follows next URL in body/header.
+   */
+  style: z.enum(['page', 'offset', 'cursor', 'link_rel']).default('page'),
   pageParam: z.string().default('page'),
   itemsPerPage: z.number().int().positive().optional(),
+  /** Dot-path to cursor token in JSON (e.g. page_info.end_cursor). Used when style is `cursor`. */
+  cursorPath: z.string().nullable().optional(),
+  /** Dot-path to next page URL in JSON (e.g. links.next). Used when style is `link_rel`. */
+  nextUrlPath: z.string().nullable().optional(),
   /** Dot-path to total page count (e.g. pagination.total). */
   totalPagesPath: z.string().nullable().optional(),
   maxPages: z.number().int().positive().default(100),
@@ -46,6 +53,10 @@ export const ApiRecipeSchema = z.object({
   fieldMap: z.record(z.union([z.string(), z.array(z.string())])),
   /** Prefix relative product URLs (e.g. https://www.sportchek.ca). */
   urlPrefix: z.string().url().optional(),
+  /** POST body template for GraphQL or JSON catalog APIs (page 1 replay). */
+  requestBody: z.string().optional(),
+  /** Parsed GraphQL operationName from network capture. */
+  graphqlOperationName: z.string().nullable().optional(),
   currency: CurrencySchema.default('CAD'),
 });
 

@@ -2,11 +2,13 @@ import { createLogger } from '@retailer/core';
 import { CrawlRecipeSchema, type CrawlRecipe, type RawExtractedProduct } from '@retailer/schema';
 import { type DiscoverContext } from '../adapters/types';
 import {
+  buildApiFetchInit,
   buildApiPageUrl,
   discoverProductsFromApiRecipe,
   getAtPath,
   mapApiProductFromRecord,
 } from './api-recipe';
+import { applyDetectedPagination, detectPaginationStyle } from './detect-pagination';
 
 const log = createLogger('crawler:validate-api');
 
@@ -20,7 +22,7 @@ export interface ValidationReport {
   reliability: number;
   estimatedCatalogSize: number;
   paginationVerified: boolean;
-  paginationStyle: 'offset' | 'page' | 'none';
+  paginationStyle: 'offset' | 'cursor' | 'page' | 'link_rel' | 'none';
   paginationParam: string | null;
   fieldsPresent: Record<string, number>;
   failureModes: string[];
@@ -32,6 +34,8 @@ export interface ApiRecipeValidation {
   count: number;
   samples: RawExtractedProduct[];
   report: ValidationReport;
+  /** Recipe with auto-detected pagination applied (when detection succeeded). */
+  recipe?: CrawlRecipe;
 }
 
 const TOTAL_COUNT_PATHS = [
@@ -128,14 +132,23 @@ export async function validateApiRecipe(
     };
   }
 
-  const api = parsed.data.api;
+  let workingRecipe = parsed.data;
+  let api = workingRecipe.api!;
+
+  const detected = await detectPaginationStyle(api, fetchJson);
+  if (detected && detected.style !== 'none') {
+    api = applyDetectedPagination(api, detected);
+    workingRecipe = { ...workingRecipe, api };
+  }
+
   const page1Url = buildApiPageUrl(api, 1);
+  const fetchInit = buildApiFetchInit(api);
   const failureModes: string[] = [];
 
   let successes = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await sleep(10_000);
-    const data = (await fetchJson(page1Url, api.headers)) as Record<string, unknown> | null;
+    const data = (await fetchJson(page1Url, api.headers, fetchInit)) as Record<string, unknown> | null;
     if (data && extractProductRecords(api, data).length > 0) successes += 1;
   }
   const reliability = successes / 3;
@@ -143,7 +156,7 @@ export async function validateApiRecipe(
     failureModes.push('low_reliability');
   }
 
-  const page1Data = (await fetchJson(page1Url, api.headers)) as Record<string, unknown> | null;
+  const page1Data = (await fetchJson(page1Url, api.headers, fetchInit)) as Record<string, unknown> | null;
   if (!page1Data) {
     return {
       ok: false,
@@ -161,10 +174,25 @@ export async function validateApiRecipe(
   }
 
   let paginationVerified = page1Records.length === 0;
-  const paginationStyle = api.pagination.style === 'offset' ? 'offset' : 'page';
+  const paginationStyle = api.pagination.style;
   if (page1Records.length > 0) {
-    const page2Url = buildApiPageUrl(api, 2);
-    const page2Data = (await fetchJson(page2Url, api.headers)) as Record<string, unknown> | null;
+    let page2Data: Record<string, unknown> | null = null;
+    if (paginationStyle === 'link_rel' && api.pagination.nextUrlPath) {
+      const nextUrl = getAtPath(page1Data, api.pagination.nextUrlPath);
+      if (typeof nextUrl === 'string' && nextUrl.startsWith('http')) {
+        page2Data = (await fetchJson(nextUrl, api.headers, fetchInit)) as Record<string, unknown> | null;
+      }
+    } else if (paginationStyle === 'cursor' && api.pagination.cursorPath) {
+      const cursor = getAtPath(page1Data, api.pagination.cursorPath);
+      if (typeof cursor === 'string' && cursor.trim()) {
+        const page2Url = buildApiPageUrl(api, 2, '', { cursor });
+        page2Data = (await fetchJson(page2Url, api.headers, fetchInit)) as Record<string, unknown> | null;
+      }
+    } else {
+      const page2Url = buildApiPageUrl(api, 2);
+      page2Data = (await fetchJson(page2Url, api.headers, fetchInit)) as Record<string, unknown> | null;
+    }
+
     const page2Records = page2Data ? extractProductRecords(api, page2Data) : [];
     const page1Urls = new Set(
       mapSamplesFromPage(api, page1Data, retailerKey, 50).map((s) => s.sourceUrl),
@@ -180,7 +208,7 @@ export async function validateApiRecipe(
 
   const samples: RawExtractedProduct[] = [];
   try {
-    for await (const raw of discoverProductsFromApiRecipe(parsed.data, retailerKey, {
+    for await (const raw of discoverProductsFromApiRecipe(workingRecipe, retailerKey, {
       limit,
       fetchJson,
     })) {
@@ -231,5 +259,11 @@ export async function validateApiRecipe(
     samples.length >= Math.min(2, limit) &&
     confidence >= PROMOTION_MIN_CONFIDENCE;
 
-  return { ok, count: samples.length, samples, report };
+  return {
+    ok,
+    count: samples.length,
+    samples,
+    report,
+    recipe: detected ? workingRecipe : undefined,
+  };
 }

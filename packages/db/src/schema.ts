@@ -214,6 +214,37 @@ export const crawlHealthReports = pgTable(
   }),
 );
 
+/** Queryable endpoint registry across retailers. */
+export const retailerEndpoints = pgTable(
+  'retailer_endpoints',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id')
+      .notNull()
+      .references(() => retailers.id, { onDelete: 'cascade' }),
+    endpointType: text('endpoint_type').notNull(),
+    url: text('url').notNull(),
+    method: text('method').notNull().default('GET'),
+    headers: jsonb('headers').$type<Record<string, string>>().default({}),
+    paginationStyle: text('pagination_style'),
+    reliabilityScore: real('reliability_score'),
+    lastValidatedAt: timestamp('last_validated_at', { withTimezone: true }),
+    lastSuccessAt: timestamp('last_success_at', { withTimezone: true }),
+    lastFailureAt: timestamp('last_failure_at', { withTimezone: true }),
+    failureCount: integer('failure_count').notNull().default(0),
+    active: boolean('active').notNull().default(true),
+  },
+  (t) => ({
+    retailerUrlMethodIdx: uniqueIndex('retailer_endpoints_retailer_id_url_method_unique').on(
+      t.retailerId,
+      t.url,
+      t.method,
+    ),
+    typeIdx: index('retailer_endpoints_type_idx').on(t.endpointType),
+    activeIdx: index('retailer_endpoints_active_idx').on(t.active),
+  }),
+);
+
 /** Incremental repair attempt log. */
 export const discoveryRepairs = pgTable(
   'discovery_repairs',

@@ -1,13 +1,21 @@
 import { chromium } from 'playwright';
 import { createLogger } from '@retailer/core';
-import { scoreJsonForProducts, type CapturedJsonResponse } from '@retailer/crawler';
+import {
+  scoreJsonForProducts,
+  buildCapturedRequest,
+  finalizeCapturedRequests,
+  parseGraphqlOperationName,
+  type CapturedRequest,
+  type CapturedJsonResponse,
+  toCapturedJsonResponse,
+} from '@retailer/crawler';
 
 const log = createLogger('worker:network-capture');
 
 const BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-const SKIP_HEADER = /^(cookie|authorization|set-cookie|content-length)$/i;
+const RESPONSE_BODY_LIMIT = 256 * 1024;
 
 function seedUrlsFor(inputUrl: string): string[] {
   const origin = new URL(inputUrl).origin;
@@ -16,7 +24,6 @@ function seedUrlsFor(inputUrl: string): string[] {
   if (host.endsWith('.ca')) {
     seeds.push(`${origin}/en-CA`, `${origin}/fr-CA`, `${origin}/en-ca`);
   }
-  // Category/listing pages trigger catalog search APIs (CT family, Magento+Klevu).
   if (host.includes('marks.com') || host.includes('atmosphere.ca') || host.includes('sportchek.ca')) {
     seeds.push(`${origin}/en/c/men`, `${origin}/en/c/women`);
   }
@@ -26,22 +33,28 @@ function seedUrlsFor(inputUrl: string): string[] {
   return [...new Set(seeds)];
 }
 
-function sanitizeHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    if (!SKIP_HEADER.test(k)) out[k] = v;
+function mapResourceType(type: string): CapturedRequest['resourceType'] {
+  if (type === 'xhr' || type === 'fetch' || type === 'document' || type === 'script') {
+    return type;
   }
-  return out;
+  return 'fetch';
+}
+
+function captureDedupeKey(requestUrl: string, method: string, requestBody?: string): string {
+  const bodyKey = requestBody ? requestBody.slice(0, 128) : '';
+  return `${method}:${requestUrl}:${bodyKey}`;
 }
 
 /**
- * Load seed pages in Playwright and collect JSON XHR/fetch responses that look
- * like product catalog APIs (sportchek-ai scrape_search_json.py pattern).
+ * Load seed pages in Playwright and collect full request metadata for catalog APIs.
+ * Stage 2 network analysis — headers, bodies, timing, GraphQL ops, cookie deps.
  */
-export async function captureNetworkJson(inputUrl: string): Promise<CapturedJsonResponse[]> {
+export async function captureNetworkRequests(inputUrl: string): Promise<CapturedRequest[]> {
   const seeds = seedUrlsFor(inputUrl);
-  const captures: CapturedJsonResponse[] = [];
+  const chronological: CapturedRequest[] = [];
   const seen = new Set<string>();
+  let captureSequence = 0;
+  const sessionStart = Date.now();
 
   const browser = await chromium.launch({
     headless: true,
@@ -56,17 +69,24 @@ export async function captureNetworkJson(inputUrl: string): Promise<CapturedJson
 
     for (const pageUrl of seeds.slice(0, 6)) {
       const page = await context.newPage();
+      const pending: Promise<void>[] = [];
+
       page.on('response', (response) => {
-        void (async () => {
+        const task = (async () => {
           const requestUrl = response.url();
-          if (seen.has(requestUrl)) return;
+          const req = response.request();
+          const method = req.method();
+          const requestBody = req.postData() ?? undefined;
+          const dedupeKey = captureDedupeKey(requestUrl, method, requestBody);
+          if (seen.has(dedupeKey)) return;
+
           const status = response.status();
           if (status < 200 || status >= 300) return;
 
           const contentType = response.headers()['content-type'] ?? '';
           const looksJson =
             contentType.includes('json') ||
-            /\/(search|catalog|products|api)\b/i.test(requestUrl);
+            /\/(search|catalog|products|api|graphql)\b/i.test(requestUrl);
           if (!looksJson) return;
 
           let text: string;
@@ -80,19 +100,33 @@ export async function captureNetworkJson(inputUrl: string): Promise<CapturedJson
           const productLikeScore = scoreJsonForProducts(text);
           if (productLikeScore < 0.35) return;
 
-          seen.add(requestUrl);
-          const req = response.request();
-          captures.push({
-            pageUrl,
-            requestUrl,
-            method: req.method(),
-            requestHeaders: sanitizeHeaders(req.headers()),
-            status,
-            contentType,
-            bodyPreview: text.slice(0, 12_000),
-            productLikeScore,
-          });
-        })();
+          seen.add(dedupeKey);
+          const seq = captureSequence++;
+          const timingStart = Date.now() - sessionStart;
+
+          chronological.push(
+            buildCapturedRequest({
+              url: requestUrl,
+              pageUrl,
+              method,
+              resourceType: mapResourceType(req.resourceType()),
+              requestHeaders: { ...req.headers() },
+              responseHeaders: { ...response.headers() },
+              requestBody,
+              status,
+              contentType,
+              responseBody: text.slice(0, RESPONSE_BODY_LIMIT),
+              productLikeScore,
+              timing: { startMs: timingStart, durationMs: seq },
+              cookiesRequired: [],
+              graphqlOperationName: parseGraphqlOperationName(requestBody),
+            }),
+          );
+        })().catch((err) => {
+          log.warn('network capture handler failed', { pageUrl, err: String(err) });
+        });
+
+        pending.push(task);
       });
 
       try {
@@ -101,11 +135,20 @@ export async function captureNetworkJson(inputUrl: string): Promise<CapturedJson
       } catch (err) {
         log.warn('network capture page load failed', { pageUrl, err: String(err) });
       }
+
+      await Promise.all(pending);
       await page.close();
     }
   } finally {
     await browser.close();
   }
 
-  return captures.sort((a, b) => b.productLikeScore - a.productLikeScore);
+  chronological.sort((a, b) => a.timing.durationMs - b.timing.durationMs);
+  return finalizeCapturedRequests(chronological);
+}
+
+/** Legacy wrapper — returns CapturedJsonResponse[] for infer-api compatibility. */
+export async function captureNetworkJson(inputUrl: string): Promise<CapturedJsonResponse[]> {
+  const captures = await captureNetworkRequests(inputUrl);
+  return captures.map(toCapturedJsonResponse);
 }

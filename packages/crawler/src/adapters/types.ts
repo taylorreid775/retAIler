@@ -7,8 +7,12 @@ export interface DiscoverContext {
   limit?: number;
   /** Override HTTP fetch (e.g. Playwright for Cloudflare-protected sitemaps). */
   fetchText?: (url: string) => Promise<string | null>;
-  /** JSON fetch; optional headers from the crawl recipe API block. */
-  fetchJson?: (url: string, headers?: Record<string, string>) => Promise<unknown | null>;
+  /** JSON fetch; optional headers and POST body from the crawl recipe API block. */
+  fetchJson?: (
+    url: string,
+    headers?: Record<string, string>,
+    init?: { method?: 'GET' | 'POST'; body?: string },
+  ) => Promise<unknown | null>;
 }
 
 /**

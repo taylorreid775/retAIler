@@ -78,7 +78,7 @@ interface CapturedRequest {
 }
 ```
 
-Persist full HAR to Vercel Blob: `discovery/{retailerKey}/{timestamp}/network.har`
+Persist HAR to Vercel Blob (private access, redacted headers): `discovery/{retailerKey}/{timestamp}/network.har`
 
 ### `validateEndpoint`
 

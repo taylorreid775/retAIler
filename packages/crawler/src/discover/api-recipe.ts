@@ -111,11 +111,19 @@ function buildApiUrl(baseUrl: string, query: Record<string, string>): string {
   return url.toString();
 }
 
+export interface ApiPageContext {
+  /** Cursor token from the previous response (cursor-style pagination). */
+  cursor?: string;
+  /** Absolute next-page URL (link_rel style). */
+  nextUrl?: string;
+}
+
 /** Build query params for a paginated API request (page 1-indexed). */
 export function buildApiPageQuery(
   api: ApiRecipe,
   page: number,
   categoryValue = '',
+  ctx: ApiPageContext = {},
 ): Record<string, string> {
   const query: Record<string, string> = {};
   for (const [k, v] of Object.entries(api.staticQuery)) {
@@ -125,6 +133,15 @@ export function buildApiPageQuery(
     query[api.categoryParam.name] = categoryValue;
   }
   const pagination = api.pagination;
+  if (pagination.style === 'link_rel') {
+    return query;
+  }
+  if (pagination.style === 'cursor') {
+    if (page > 1 && ctx.cursor) {
+      query[pagination.pageParam] = ctx.cursor;
+    }
+    return query;
+  }
   const pageSize = pagination.itemsPerPage ?? 24;
   query[pagination.pageParam] =
     pagination.style === 'offset' ? String((page - 1) * pageSize) : String(page);
@@ -132,8 +149,33 @@ export function buildApiPageQuery(
 }
 
 /** Full URL for a paginated API page (page 1-indexed). */
-export function buildApiPageUrl(api: ApiRecipe, page: number, categoryValue = ''): string {
-  return buildApiUrl(api.baseUrl, buildApiPageQuery(api, page, categoryValue));
+export function buildApiPageUrl(
+  api: ApiRecipe,
+  page: number,
+  categoryValue = '',
+  ctx: ApiPageContext = {},
+): string {
+  if (paginationUsesNextUrl(api, page, ctx)) {
+    return ctx.nextUrl!;
+  }
+  return buildApiUrl(api.baseUrl, buildApiPageQuery(api, page, categoryValue, ctx));
+}
+
+function paginationUsesNextUrl(api: ApiRecipe, page: number, ctx: ApiPageContext): boolean {
+  return api.pagination.style === 'link_rel' && page > 1 && Boolean(ctx.nextUrl);
+}
+
+function readNextUrl(data: unknown, api: ApiRecipe): string | null {
+  const path = api.pagination.nextUrlPath ?? 'links.next';
+  const value = getAtPath(data, path);
+  return typeof value === 'string' && value.startsWith('http') ? value : null;
+}
+
+function readCursor(data: unknown, api: ApiRecipe): string | null {
+  const path = api.pagination.cursorPath;
+  if (!path) return null;
+  const value = getAtPath(data, path);
+  return typeof value === 'string' && value.trim() ? value : null;
 }
 
 type CategorySlice = { value: string; label?: string; key?: string };
@@ -187,14 +229,13 @@ export async function* discoverProductsFromApiRecipe(
     let page = 1;
     let totalPages: number | undefined;
     const pagination = api.pagination;
+    let pageCtx: ApiPageContext = {};
 
     while (true) {
       if (ctx.limit && count >= ctx.limit) return;
 
-      const query = buildApiPageQuery(api, page, category.value);
-
-      const url = buildApiUrl(api.baseUrl, query);
-      const data = await fetchPageWithRetry(ctx, url, api.headers);
+      const url = buildApiPageUrl(api, page, category.value, pageCtx);
+      const data = await fetchPageWithRetry(ctx, url, api);
       const productsRaw = data ? getAtPath(data, api.productsPath) : null;
       const products = Array.isArray(productsRaw) ? productsRaw : [];
 
@@ -224,7 +265,17 @@ export async function* discoverProductsFromApiRecipe(
       }
 
       const perPage = pagination.itemsPerPage ?? products.length;
-      if (products.length < perPage) break;
+      if (pagination.style === 'link_rel') {
+        const nextUrl = readNextUrl(data, api);
+        if (!nextUrl) break;
+        pageCtx = { nextUrl };
+      } else if (pagination.style === 'cursor') {
+        const cursor = readCursor(data, api);
+        if (!cursor) break;
+        pageCtx = { cursor };
+      } else {
+        if (products.length < perPage) break;
+      }
       if (totalPages && page >= totalPages) break;
       if (page >= pagination.maxPages) break;
 
@@ -238,18 +289,31 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function apiFetchInit(api: ApiRecipe): { method: 'GET' | 'POST'; body?: string } | undefined {
+  if (api.method === 'POST' && api.requestBody) {
+    return { method: 'POST', body: api.requestBody };
+  }
+  return undefined;
+}
+
 /** Retry catalog fetches — Sport Chek APIM rate-limits after ~100 pages. */
 async function fetchPageWithRetry(
   ctx: DiscoverContext,
   url: string,
-  headers: Record<string, string>,
+  api: ApiRecipe,
   attempts = 4,
 ): Promise<Record<string, unknown> | null> {
+  const init = apiFetchInit(api);
   for (let i = 0; i < attempts; i++) {
-    const data = (await ctx.fetchJson!(url, headers)) as Record<string, unknown> | null;
+    const data = (await ctx.fetchJson!(url, api.headers, init)) as Record<string, unknown> | null;
     if (data) return data;
     const wait = Math.min(30_000, 3_000 * 2 ** i);
     await sleep(wait);
   }
   return null;
+}
+
+/** Build fetch init for API recipe replay (GET or POST). */
+export function buildApiFetchInit(api: ApiRecipe): { method?: 'GET' | 'POST'; body?: string } | undefined {
+  return apiFetchInit(api);
 }
