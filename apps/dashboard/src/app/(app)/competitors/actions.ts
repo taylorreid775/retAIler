@@ -1,10 +1,11 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { db, schema, eq, and, or, desc, inArray, ne, count, writeRecipeVersion } from '@retailer/db';
+import { db, schema, eq, and, or, desc, inArray, ne, count, writeRecipeVersion, createDiscoveryRun, completeDiscoveryRun, checkpointDiscoveryStage } from '@retailer/db';
 import { discoverSite, fingerprintSite, deriveRetailerKey, normalizeRetailerDomain, discoverListingPageUrls, saveListingPageUrls } from '@retailer/crawler';
 import { queues } from '@retailer/jobs';
 import { PLAN_LIMITS } from '@retailer/schema';
+import type { DiscoveryStage, StageCheckpoint } from '@retailer/schema';
 import { getTenant } from '@/lib/tenant';
 import { isDevCrawlNowEnabled } from '@/lib/dev-flags';
 
@@ -63,7 +64,7 @@ export interface AddStoreResult {
     sitemapUrls: string[];
     productUrlPattern: string | null;
     llmsTxtUrl: string | null;
-    fetchStrategy: 'static' | 'browser';
+    fetchStrategy: 'static' | 'browser' | 'jina_reader';
     confidence: number;
     sampleProductUrls: string[];
     crawlRecipe?: unknown;
@@ -471,6 +472,20 @@ async function promoteDiscoveredStore(
     })
     .where(eq(schema.storeOnboarding.id, onboardingId));
 
+  try {
+    const runId = await createDiscoveryRun({ onboardingId, retailerId: retailer.id });
+    await checkpointDiscoveryStage({
+      runId,
+      stage: 'static',
+      status: 'completed',
+      fingerprint,
+    });
+    await checkpointDiscoveryStage({ runId, stage: 'promote', status: 'completed' });
+    await completeDiscoveryRun({ runId, status: 'completed', retailerId: retailer.id });
+  } catch {
+    // discovery_runs table may not exist until migration is applied
+  }
+
   revalidatePath('/competitors');
   revalidatePath('/');
   return { discovery: view };
@@ -516,6 +531,11 @@ export interface OnboardingStatus {
   status: 'queued' | 'discovering' | 'ready' | 'failed';
   error: string | null;
   updatedAt: string;
+  discovery?: {
+    currentStage: DiscoveryStage | null;
+    stagesCompleted: StageCheckpoint[];
+    runStatus: string;
+  };
 }
 
 /**
@@ -536,12 +556,45 @@ export async function getOnboardingStatuses(): Promise<OnboardingStatus[]> {
     .from(schema.storeOnboarding)
     .where(eq(schema.storeOnboarding.orgId, tenant.org.id))
     .orderBy(desc(schema.storeOnboarding.createdAt));
+
+  const activeIds = rows
+    .filter((r) => r.status === 'queued' || r.status === 'discovering')
+    .map((r) => r.id);
+  const runByOnboarding = new Map<
+    string,
+    { currentStage: DiscoveryStage | null; stagesCompleted: StageCheckpoint[]; runStatus: string }
+  >();
+
+  if (activeIds.length > 0) {
+    const runs = await db
+      .select({
+        onboardingId: schema.discoveryRuns.onboardingId,
+        currentStage: schema.discoveryRuns.currentStage,
+        stagesCompleted: schema.discoveryRuns.stagesCompleted,
+        status: schema.discoveryRuns.status,
+        startedAt: schema.discoveryRuns.startedAt,
+      })
+      .from(schema.discoveryRuns)
+      .where(inArray(schema.discoveryRuns.onboardingId, activeIds))
+      .orderBy(desc(schema.discoveryRuns.startedAt));
+
+    for (const run of runs) {
+      if (!run.onboardingId || runByOnboarding.has(run.onboardingId)) continue;
+      runByOnboarding.set(run.onboardingId, {
+        currentStage: (run.currentStage as DiscoveryStage | null) ?? null,
+        stagesCompleted: run.stagesCompleted ?? [],
+        runStatus: run.status,
+      });
+    }
+  }
+
   return rows.map((r) => ({
     id: r.id,
     inputUrl: r.inputUrl,
     status: r.status,
     error: r.error,
     updatedAt: r.updatedAt.toISOString(),
+    discovery: runByOnboarding.get(r.id),
   }));
 }
 

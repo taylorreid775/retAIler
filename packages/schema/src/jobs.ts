@@ -11,13 +11,25 @@ export const QueueName = {
   Reports: 'reports-send',
   CrawlHealth: 'crawl-health',
   DiscoverRepair: 'store-discover-repair',
+  Rediscover: 'store-rediscover',
 } as const;
 export type QueueName = (typeof QueueName)[keyof typeof QueueName];
 
 /** Discover a self-serve store's crawl config in the background (browser-capable). */
-export const DiscoverConfigJobSchema = z.object({
-  onboardingId: z.string().uuid(),
-});
+export const DiscoverConfigJobSchema = z
+  .object({
+    onboardingId: z.string().uuid().optional(),
+    rediscover: z
+      .object({
+        retailerKey: z.string(),
+        reason: z.string(),
+        preserveEndpoints: z.boolean().default(true),
+      })
+      .optional(),
+  })
+  .refine((data) => data.onboardingId != null || data.rediscover != null, {
+    message: 'DiscoverConfigJob requires onboardingId or rediscover',
+  });
 export type DiscoverConfigJob = z.infer<typeof DiscoverConfigJobSchema>;
 
 /** Discover URLs to crawl for a retailer (sitemaps / category walk). */
@@ -83,3 +95,11 @@ export const DiscoverRepairJobSchema = z.object({
   healthReportId: z.string().uuid().optional(),
 });
 export type DiscoverRepairJob = z.infer<typeof DiscoverRepairJobSchema>;
+
+/** Full rediscovery for unhealthy or stale crawl configs. */
+export const RediscoverJobSchema = z.object({
+  retailerKey: z.string(),
+  reason: z.string(),
+  preserveEndpoints: z.boolean().default(true),
+});
+export type RediscoverJob = z.infer<typeof RediscoverJobSchema>;

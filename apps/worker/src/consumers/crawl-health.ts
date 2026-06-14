@@ -9,6 +9,8 @@ const log = createLogger('worker:crawl-health');
 
 const REPAIR_MIN_SCORE = 0.4;
 const REPAIR_MAX_SCORE = 0.7;
+const REDISCOVER_MAX_SCORE = 0.4;
+const CONSECUTIVE_LOW_CRAWLS = 3;
 
 function estimatedCatalogFromReport(report: unknown): number {
   if (!report || typeof report !== 'object') return 0;
@@ -152,6 +154,33 @@ export function startCrawlHealthWorker(): Worker<CrawlHealthJob> {
           healthReportId: report.id,
         });
         log.info('enqueued discover repair', { retailerKey, healthScore: evaluation.healthScore });
+      }
+
+      if (evaluation.healthScore < REDISCOVER_MAX_SCORE) {
+        const recent = await db
+          .select({ healthScore: schema.crawlHealthReports.healthScore })
+          .from(schema.crawlHealthReports)
+          .where(eq(schema.crawlHealthReports.retailerId, retailer.id))
+          .orderBy(desc(schema.crawlHealthReports.createdAt))
+          .limit(CONSECUTIVE_LOW_CRAWLS);
+        const allLow =
+          recent.length >= CONSECUTIVE_LOW_CRAWLS &&
+          recent.every((r) => (r.healthScore ?? 1) < REDISCOVER_MAX_SCORE);
+        if (allLow) {
+          await queues.rediscover().add(
+            'rediscover',
+            {
+              retailerKey,
+              reason: 'health_score_below_0.4_x3',
+              preserveEndpoints: true,
+            },
+            { jobId: `rediscover:${retailerKey}` },
+          );
+          log.warn('enqueued rediscover after consecutive low health', {
+            retailerKey,
+            healthScore: evaluation.healthScore,
+          });
+        }
       }
     },
     { connection: redisConnection(), concurrency: 4 },

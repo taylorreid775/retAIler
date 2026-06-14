@@ -46,6 +46,13 @@ export async function registerSchedules(): Promise<void> {
     { repeat: { pattern: '0 8 * * 1' }, jobId: 'cron:reports' },
   );
   log.info('scheduled weekly reports', { queue: QueueName.Reports });
+
+  await queues.rediscover().add(
+    'weekly-unhealthy-fanout',
+    { retailerKey: '__fanout__', reason: 'weekly_schedule', preserveEndpoints: true },
+    { repeat: { pattern: '0 3 * * 0' }, jobId: 'cron:rediscover-fanout' },
+  );
+  log.info('scheduled weekly rediscovery fan-out', { queue: QueueName.Rediscover });
 }
 
 export const REPORTS_FANOUT_SENTINEL = '00000000-0000-0000-0000-000000000000';

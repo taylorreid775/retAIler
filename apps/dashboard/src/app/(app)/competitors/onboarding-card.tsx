@@ -2,6 +2,7 @@
 
 import { Card, CardContent } from '@retailer/ui';
 import type { OnboardingStatus } from './actions';
+import { DiscoveryStageStepper } from '@/components/discovery-stage-stepper';
 
 export function hostOf(input: string): string {
   try {
@@ -75,6 +76,12 @@ export function OnboardingCard({
             <p className="text-xs text-[var(--muted-foreground)]">
               Analyzing… protected sites can take a minute.
             </p>
+            {item.discovery ? (
+              <DiscoveryStageStepper
+                currentStage={item.discovery.currentStage}
+                stagesCompleted={item.discovery.stagesCompleted}
+              />
+            ) : null}
           </div>
         </div>
         <span className="text-xs font-medium uppercase tracking-wide text-[var(--muted-foreground)]">

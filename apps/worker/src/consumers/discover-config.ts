@@ -1,6 +1,6 @@
 import { Worker, type Job, queues, redisConnection } from '@retailer/jobs';
 import { createLogger } from '@retailer/core';
-import { db, schema, eq, or, count, writeRecipeVersion, desc, and, inArray, ne } from '@retailer/db';
+import { db, schema, eq, or, count, writeRecipeVersion, desc, and, inArray, ne, createDiscoveryRun, DiscoveryRunTracker } from '@retailer/db';
 import {
   discoverSite,
   deriveProductPattern,
@@ -28,6 +28,11 @@ import {
   type CategoryDirectoryResult,
   type CapturedRequest,
   normalizeRetailerDomain,
+  loadEndpointPatterns,
+  readKnowledgeDocs,
+  hardBlockReasonFromKnowledge,
+  shouldPromoteRediscovery,
+  tryRegistryAcceleratedApiDiscovery,
 } from '@retailer/crawler';
 import { QueueName, PLAN_LIMITS, type DiscoverConfigJob, type RetailerFingerprint } from '@retailer/schema';
 import { createDiscoverFetchText } from '../discover-fetch.js';
@@ -35,6 +40,7 @@ import { getBrowserPool, resolveDiscoveryConcurrency } from '../browser-pool.js'
 import type { BrowserFetcher } from '../browser-fetcher.js';
 import { createApiFetchJson } from '../api-fetch.js';
 import { captureNetworkRequests } from '../network-capture.js';
+import { getRetailer } from '../retailers.js';
 
 const log = createLogger('worker:discover-config');
 
@@ -56,11 +62,16 @@ function toDiscoveryView(d: SiteDiscovery) {
 }
 
 async function markFailed(
-  onboardingId: string,
+  onboardingId: string | undefined,
   error: string,
   result?: unknown,
   normalizedDomain?: string | null,
+  tracker?: DiscoveryRunTracker,
 ): Promise<void> {
+  if (tracker) {
+    await tracker.fail(error);
+  }
+  if (!onboardingId) return;
   let domain = normalizedDomain ?? null;
   if (!domain) {
     const [row] = await db
@@ -109,33 +120,84 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
   return new Worker<DiscoverConfigJob>(
     QueueName.DiscoverConfig,
     async (job: Job<DiscoverConfigJob>) => {
-      const { onboardingId } = job.data;
+      const rediscover = job.data.rediscover;
+      let onboardingId = job.data.onboardingId;
+      let orgId: string | undefined;
+      let inputUrl: string;
+      let existingRetailerId: string | undefined;
+      let isRediscover = false;
+      let rediscoverReason: string | undefined;
+      let preserveEndpoints = true;
 
-      const [onboarding] = await db
-        .select()
-        .from(schema.storeOnboarding)
-        .where(eq(schema.storeOnboarding.id, onboardingId));
-      if (!onboarding) {
-        log.warn('onboarding row gone, skipping', { onboardingId });
-        return;
-      }
-      if (onboarding.status === 'ready') {
-        log.info('onboarding already ready, skipping', { onboardingId });
-        return;
+      if (rediscover) {
+        const retailer = await getRetailer(rediscover.retailerKey);
+        if (!retailer) throw new Error(`unknown retailer ${rediscover.retailerKey}`);
+        if (!retailer.enabled) {
+          log.info('rediscover skipped for disabled retailer', { key: rediscover.retailerKey });
+          return;
+        }
+        isRediscover = true;
+        rediscoverReason = rediscover.reason;
+        preserveEndpoints = rediscover.preserveEndpoints ?? true;
+        existingRetailerId = retailer.id;
+        inputUrl = retailer.homepageUrl ?? `https://${retailer.domain}`;
+      } else if (onboardingId) {
+        const [onboarding] = await db
+          .select()
+          .from(schema.storeOnboarding)
+          .where(eq(schema.storeOnboarding.id, onboardingId));
+        if (!onboarding) {
+          log.warn('onboarding row gone, skipping', { onboardingId });
+          return;
+        }
+        if (onboarding.status === 'ready') {
+          log.info('onboarding already ready, skipping', { onboardingId });
+          return;
+        }
+        orgId = onboarding.orgId;
+        inputUrl = onboarding.inputUrl;
+      } else {
+        throw new Error('DiscoverConfigJob requires onboardingId or rediscover');
       }
 
-      const inputUrl = onboarding.inputUrl;
+      const runId = await createDiscoveryRun({
+        onboardingId,
+        retailerId: existingRetailerId,
+      });
+      const tracker = new DiscoveryRunTracker(runId);
+
+      if (!isRediscover && onboardingId) {
+        const onboardingDomain = normalizeRetailerDomain(inputUrl);
+        await db
+          .update(schema.storeOnboarding)
+          .set({
+            status: 'discovering',
+            normalizedDomain: onboardingDomain,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.storeOnboarding.id, onboardingId));
+      }
+
       const onboardingDomain = normalizeRetailerDomain(inputUrl);
 
-      await db
-        .update(schema.storeOnboarding)
-        .set({
-          status: 'discovering',
-          normalizedDomain: onboardingDomain,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.storeOnboarding.id, onboardingId));
+      if (isRediscover && rediscover) {
+        const knowledge = await readKnowledgeDocs(rediscover.retailerKey);
+        const hardBlock = hardBlockReasonFromKnowledge(knowledge);
+        if (hardBlock) {
+          log.info('rediscover skipped — hard block in knowledge docs', {
+            key: rediscover.retailerKey,
+            reason: hardBlock,
+          });
+          await tracker.complete({
+            status: 'completed',
+            retailerId: existingRetailerId,
+            error: hardBlock,
+          });
+          return;
+        }
+      }
 
+      try {
       await pool.runExclusive(async (browserFetcher) => {
         // Onboarding always uses browser fallback — new stores are often behind
         // Cloudflare/Akamai before we know their fetchStrategy.
@@ -186,6 +248,13 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
               apiValidationReport = platformPackResult.validationReport;
             }
           }
+
+          await tracker.checkpoint({
+            stage: 'fingerprint',
+            status: 'completed',
+            fingerprint,
+          });
+          await tracker.checkpoint({ stage: 'static', status: 'completed', fingerprint });
         } catch (err) {
         log.error('discovery threw', { onboardingId, inputUrl, err: String(err) });
         await markFailed(
@@ -193,6 +262,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           `Could not analyze that site: ${String(err)}`,
           undefined,
           onboardingDomain,
+          tracker,
         );
         return;
       }
@@ -204,6 +274,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
             homepageUrl: discovery.homepageUrl,
             domain: discovery.domain,
           });
+          if (jinaResult?.usage) tracker.addTokens(jinaResult.usage);
         if (
           jinaResult &&
           jinaResult.directory.confidence >= 0.3 &&
@@ -241,16 +312,58 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
       // Stage 2 network sniff when no validated API endpoint meets promotion threshold.
       const hasValidatedApiEndpoint =
         apiValidationReport != null && apiValidationReport.confidence >= PROMOTION_MIN_CONFIDENCE;
-      const needsApiSniff = !hasValidatedApiEndpoint;
+      let needsApiSniff = !hasValidatedApiEndpoint;
+
+      if (needsApiSniff && isRediscover && preserveEndpoints) {
+        const fetchStrategy =
+          discovery.fetchStrategy === 'browser' ? 'browser' : ('static' as const);
+        const fetchJson = createApiFetchJson({ fetchStrategy, browserFetcher });
+        const accelerated = await tryRegistryAcceleratedApiDiscovery({
+          retailerId: existingRetailerId,
+          platform: fingerprint.platform,
+          discovery,
+          fetchJson,
+          preferRetailerEndpoints: true,
+        });
+        if (accelerated.used) {
+          discovery = accelerated.discovery;
+          apiValidationReport = accelerated.validationReport;
+          needsApiSniff = false;
+          await tracker.checkpoint({ stage: 'validate', status: 'completed' });
+          log.info('registry accelerated discovery skipped network sniff', {
+            key: discovery.key,
+            source: accelerated.source,
+          });
+        }
+      }
 
       if (needsApiSniff) {
-        const networkResult = await tryNetworkApiDiscovery(inputUrl, discovery, browserFetcher);
+        const patterns = await loadEndpointPatterns(fingerprint.platform);
+        const patternHit = patterns.find((p) => p.platform === fingerprint.platform);
+        if (patternHit) {
+          log.info('endpoint pattern library hit', {
+            platform: fingerprint.platform,
+            pattern: patternHit.urlRegex,
+            retailers: patternHit.retailerCount,
+          });
+        }
+        const networkResult = await tryNetworkApiDiscovery(
+          inputUrl,
+          discovery,
+          browserFetcher,
+          tracker,
+        );
         discovery = networkResult.discovery;
         if (networkResult.validationReport) {
           apiValidationReport = networkResult.validationReport;
+          await tracker.checkpoint({ stage: 'validate', status: 'completed' });
         }
         networkCaptures = networkResult.captures;
+      } else if (apiValidationReport) {
+        await tracker.checkpoint({ stage: 'validate', status: 'completed' });
       }
+
+      await tracker.checkpoint({ stage: 'generate', status: 'completed', fingerprint });
 
       const effectivePattern =
         discovery.productUrlPattern ?? deriveProductPattern(discovery.sampleProductUrls);
@@ -301,6 +414,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           msg + (discovery.notes ? ` (${discovery.notes})` : ''),
           view,
           onboardingDomain,
+          tracker,
         );
         return;
       }
@@ -314,12 +428,50 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           or(eq(schema.retailers.key, discovery.key), eq(schema.retailers.domain, normalizedDomain)),
         );
 
-      let retailerId: string;
+      let retailerId = existing?.id ?? existingRetailerId ?? '';
       let recipeVersion = 1;
-      const recipeChanged = hasJinaRecipe || hasApiRecipe || platformPackUsed;
-      if (existing) {
-        retailerId = existing.id;
-        if (recipeChanged) {
+      const recipeCandidate = hasJinaRecipe || hasApiRecipe || platformPackUsed;
+      let shouldPromote = recipeCandidate;
+
+      if (isRediscover && (existing || existingRetailerId)) {
+        const promoteTargetId = existing?.id ?? existingRetailerId!;
+        const [latestVersion] = await db
+          .select({
+            confidence: schema.retailerRecipeVersions.confidence,
+            validationReport: schema.retailerRecipeVersions.validationReport,
+          })
+          .from(schema.retailerRecipeVersions)
+          .where(eq(schema.retailerRecipeVersions.retailerId, promoteTargetId))
+          .orderBy(desc(schema.retailerRecipeVersions.version))
+          .limit(1);
+
+        shouldPromote = shouldPromoteRediscovery({
+          currentConfidence:
+            latestVersion?.confidence ?? existing?.discoveryConfidence ?? 0,
+          currentValidationReport: latestVersion?.validationReport,
+          candidateConfidence: discovery.confidence,
+          candidateValidationReport: apiValidationReport,
+          hasApiRecipe,
+          hasJinaRecipe,
+          hasPathEvidence,
+        });
+
+        if (!shouldPromote) {
+          log.info('rediscover completed without promotion — candidate not stronger', {
+            key: discovery.key,
+            retailerId: promoteTargetId,
+            currentConfidence: latestVersion?.confidence ?? existing?.discoveryConfidence ?? 0,
+            candidateConfidence: discovery.confidence,
+            rediscoverReason,
+          });
+          await tracker.complete({ status: 'completed', retailerId: promoteTargetId });
+          return;
+        }
+      }
+
+      if (existing || (isRediscover && existingRetailerId)) {
+        retailerId = existing?.id ?? existingRetailerId!;
+        if (shouldPromote) {
           recipeVersion = await db.transaction(async (tx) => {
             await tx
               .update(schema.retailers)
@@ -330,7 +482,9 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
                 crawlRecipe: discovery.crawlRecipe,
                 fingerprint,
                 discoveryConfidence: discovery.confidence,
-                updatedAt: new Date(),
+                ...(isRediscover
+                  ? { lastRediscoveryAt: new Date(), updatedAt: new Date() }
+                  : { updatedAt: new Date() }),
               })
               .where(eq(schema.retailers.id, retailerId));
             return writeRecipeVersion(
@@ -354,18 +508,18 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
             .limit(1);
           recipeVersion = row?.version ?? 1;
         }
-      } else {
+      } else if (!isRediscover && orgId) {
         // Re-check the plan limit at promotion time — the org may have hit the
         // cap while this job was queued.
         const org = await db
           .select({ plan: schema.orgs.plan })
           .from(schema.orgs)
-          .where(eq(schema.orgs.id, onboarding.orgId));
+          .where(eq(schema.orgs.id, orgId));
         const plan = org[0]?.plan ?? 'trial';
         const [{ value: trackedCount } = { value: 0 }] = await db
           .select({ value: count() })
           .from(schema.orgCompetitors)
-          .where(eq(schema.orgCompetitors.orgId, onboarding.orgId));
+          .where(eq(schema.orgCompetitors.orgId, orgId));
         const maxCompetitors = PLAN_LIMITS[plan].maxCompetitors;
         if (trackedCount >= maxCompetitors) {
           log.warn('plan limit reached at promotion', { onboardingId, plan, trackedCount });
@@ -374,6 +528,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
             `Your ${plan} plan allows ${maxCompetitors} competitors. Upgrade to add this store.`,
             view,
             normalizedDomain,
+            tracker,
           );
           return;
         }
@@ -421,11 +576,27 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
           return { id: row.id, version };
         });
         if (!created) {
-          await markFailed(onboardingId, 'Failed to create the store record', view, normalizedDomain);
+          await markFailed(
+            onboardingId,
+            'Failed to create the store record',
+            view,
+            normalizedDomain,
+            tracker,
+          );
           return;
         }
         retailerId = created.id;
         recipeVersion = created.version;
+      } else if (isRediscover) {
+        await tracker.fail('Rediscover target retailer not found');
+        throw new Error('Rediscover target retailer not found');
+      } else {
+        throw new Error('Discovery completed without retailer promotion');
+      }
+
+      if (!retailerId) {
+        await tracker.fail('Missing retailer id after promotion');
+        throw new Error('Missing retailer id after promotion');
       }
 
       if (jinaResult && hasJinaRecipe) {
@@ -461,12 +632,16 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         }
       }
 
-      await db
-        .insert(schema.orgCompetitors)
-        .values({ orgId: onboarding.orgId, retailerId })
-        .onConflictDoNothing();
+      if (!isRediscover && orgId) {
+        await db
+          .insert(schema.orgCompetitors)
+          .values({ orgId, retailerId })
+          .onConflictDoNothing();
+      }
 
-      await finalizeWaitingOnboardings(normalizedDomain, retailerId, view);
+      if (!isRediscover) {
+        await finalizeWaitingOnboardings(normalizedDomain, retailerId, view);
+      }
 
       try {
         const docsDir = await writeKnowledgeDocs({
@@ -491,7 +666,7 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         });
       }
 
-      // Kick off the first crawl (only runs once the discover worker consumes it).
+      // Kick off the first crawl (or validation crawl after rediscovery).
       const [run] = await db
         .insert(schema.crawlRuns)
         .values({ retailerId, status: 'queued' })
@@ -500,18 +675,38 @@ export function startDiscoverConfigWorker(): Worker<DiscoverConfigJob> {
         await queues.discover().add('discover', { retailerKey: discovery.key, crawlRunId: run.id });
       }
 
-      await db
-        .update(schema.storeOnboarding)
-        .set({ status: 'ready', retailerId, result: view, error: null, updatedAt: new Date() })
-        .where(eq(schema.storeOnboarding.id, onboardingId));
+      if (onboardingId) {
+        await db
+          .update(schema.storeOnboarding)
+          .set({ status: 'ready', retailerId, result: view, error: null, updatedAt: new Date() })
+          .where(eq(schema.storeOnboarding.id, onboardingId));
+      }
 
-      log.info('store onboarded', {
+      await tracker.checkpoint({ stage: 'promote', status: 'completed' });
+      await tracker.complete({ status: 'completed', retailerId });
+
+      log.info(isRediscover ? 'store rediscovered' : 'store onboarded', {
         onboardingId,
         retailerId,
         key: discovery.key,
         fetchStrategy: discovery.fetchStrategy,
+        rediscoverReason,
       });
       }); // end runExclusive
+      } catch (err) {
+        log.error('discover-config job failed', { onboardingId, err: String(err) });
+        if (onboardingId) {
+          await markFailed(
+            onboardingId,
+            String(err),
+            undefined,
+            onboardingDomain,
+            tracker,
+          );
+        } else {
+          await tracker.fail(String(err));
+        }
+      }
     },
     { connection: redisConnection(), concurrency },
   );
@@ -676,6 +871,7 @@ async function tryNetworkApiDiscovery(
   inputUrl: string,
   discovery: SiteDiscovery,
   browserFetcher: BrowserFetcher,
+  tracker?: DiscoveryRunTracker,
 ): Promise<{
   discovery: SiteDiscovery;
   validationReport?: ApiRecipeValidation['report'];
@@ -686,20 +882,30 @@ async function tryNetworkApiDiscovery(
   const captures = await captureNetworkRequests(inputUrl);
   if (!captures.length) {
     log.info('network API sniff found no product-like JSON', { inputUrl });
+    await tracker?.checkpoint({ stage: 'network', status: 'skipped' });
     return { discovery };
   }
 
+  let harUrl: string | undefined;
   try {
     const har = await storeNetworkHar(discovery.key, captures);
+    harUrl = har.url;
     log.info('network HAR exported', { key: discovery.key, blobKey: har.blobKey, url: har.url });
   } catch (err) {
     log.warn('network HAR export failed', { key: discovery.key, err: String(err) });
   }
 
+  await tracker?.checkpoint({
+    stage: 'network',
+    status: 'completed',
+    artifactUrl: harUrl,
+  });
+
   const inferred = await inferApiRecipeFromCaptures(captures, {
     domain: discovery.domain,
     homepageUrl: discovery.homepageUrl,
   });
+  if (inferred?.usage) tracker?.addTokens(inferred.usage);
   if (!inferred) {
     log.warn('network API sniff could not infer recipe', { inputUrl, captures: captures.length });
     return { discovery, captures };

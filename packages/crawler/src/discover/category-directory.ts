@@ -62,6 +62,7 @@ const MAX_HEURISTIC_CATEGORIES = 120;
 export type CategoryDirectoryResult = {
   directory: CategoryDirectory;
   crawlRecipe: CrawlRecipe;
+  usage?: { totalTokens: number };
 };
 
 export interface DiscoverCategoryDirectoryOptions {
@@ -79,7 +80,7 @@ export interface DiscoverCategoryDirectoryOptions {
  */
 export async function discoverCategoryDirectory(
   opts: DiscoverCategoryDirectoryOptions,
-): Promise<CategoryDirectoryResult | null> {
+): Promise<(CategoryDirectoryResult & { usage?: { totalTokens: number } }) | null> {
   const spotCheckLimit = opts.spotCheckLimit ?? 2;
   let markdown = opts.homepageMarkdown;
 
@@ -96,8 +97,9 @@ export async function discoverCategoryDirectory(
   const trimmed = markdown.slice(0, 24_000);
 
   let directory: CategoryDirectory | null = null;
+  let aiUsage: { totalTokens: number } | undefined;
   try {
-    const { object } = await generateObject({
+    const { object, usage } = await generateObject({
       model: extractionModel(),
       schema: CategoryDirectoryInferenceSchema,
       system:
@@ -117,6 +119,7 @@ export async function discoverCategoryDirectory(
         `\n\nHOMEPAGE MARKDOWN:\n${trimmed}`,
     });
     directory = normalizeInferredDirectory(object);
+    if (usage?.totalTokens) aiUsage = { totalTokens: usage.totalTokens };
   } catch (err) {
     log.warn('category directory AI failed, using heuristic fallback', { err: String(err) });
     directory = heuristic.categories.length >= 3 ? heuristic : null;
@@ -168,7 +171,7 @@ export async function discoverCategoryDirectory(
     },
   };
 
-  return { directory: spotChecked, crawlRecipe };
+  return { directory: spotChecked, crawlRecipe, usage: aiUsage };
 }
 
 /**

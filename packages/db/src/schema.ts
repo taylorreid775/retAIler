@@ -603,4 +603,34 @@ export const storeOnboarding = pgTable(
   }),
 );
 
+/** Multi-stage discovery job tracking (onboarding + rediscovery). */
+export const discoveryRuns = pgTable(
+  'discovery_runs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    retailerId: uuid('retailer_id').references(() => retailers.id, { onDelete: 'set null' }),
+    onboardingId: uuid('onboarding_id').references(() => storeOnboarding.id, {
+      onDelete: 'set null',
+    }),
+    status: text('status').notNull(),
+    currentStage: text('current_stage'),
+    stagesCompleted: jsonb('stages_completed')
+      .$type<import('@retailer/schema').StageCheckpoint[]>()
+      .notNull()
+      .default([]),
+    fingerprint: jsonb('fingerprint').$type<import('@retailer/schema').RetailerFingerprint>(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    error: text('error'),
+    tokenUsage: integer('token_usage').notNull().default(0),
+    costUsd: real('cost_usd').notNull().default(0),
+  },
+  (t) => ({
+    onboardingIdx: index('discovery_runs_onboarding_id_idx').on(t.onboardingId),
+    statusIdx: index('discovery_runs_status_idx').on(t.status),
+    retailerIdx: index('discovery_runs_retailer_id_idx').on(t.retailerId),
+    startedAtIdx: index('discovery_runs_started_at_idx').on(t.startedAt),
+  }),
+);
+
 export const schemaSql = sql; // re-export for migration helpers

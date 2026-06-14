@@ -1,6 +1,6 @@
-import { Worker, type Job, redisConnection } from '@retailer/jobs';
+import { Worker, type Job, queues, redisConnection } from '@retailer/jobs';
 import { createLogger } from '@retailer/core';
-import { db, schema, eq, sql, writeRecipeVersion } from '@retailer/db';
+import { db, schema, eq, sql, desc, writeRecipeVersion } from '@retailer/db';
 import {
   applyRepairStrategy,
   readKnowledgeDocs,
@@ -154,6 +154,25 @@ export function startDiscoverRepairWorker(): Worker<DiscoverRepairJob> {
         details: { strategies: strategies as RepairStrategyName[] },
       });
       log.warn('all repair strategies exhausted', { retailerKey, strategies });
+
+      const recentFailures = await db
+        .select({ success: schema.discoveryRepairs.success })
+        .from(schema.discoveryRepairs)
+        .where(eq(schema.discoveryRepairs.retailerId, retailer.id))
+        .orderBy(desc(schema.discoveryRepairs.createdAt))
+        .limit(2);
+      if (recentFailures.length >= 2 && recentFailures.every((r) => !r.success)) {
+        await queues.rediscover().add(
+          'rediscover',
+          {
+            retailerKey,
+            reason: 'repair_exhausted_x2',
+            preserveEndpoints: true,
+          },
+          { jobId: `rediscover:${retailerKey}` },
+        );
+        log.warn('enqueued rediscover after consecutive repair failures', { retailerKey });
+      }
     },
     { connection: redisConnection(), concurrency: 2 },
   );

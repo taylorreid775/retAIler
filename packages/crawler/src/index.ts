@@ -33,3 +33,6 @@ export * from './discover/repair/index';
 export * from './discover/knowledge/writer';
 export * from './discover/knowledge/reader';
 export * from './discover/knowledge/db';
+export * from './discover/endpoint-patterns';
+export * from './discover/rediscover-guards';
+export * from './discover/registry-accelerated';

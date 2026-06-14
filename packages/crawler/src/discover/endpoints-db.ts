@@ -75,6 +75,20 @@ export async function upsertRetailerEndpoint(
     });
 }
 
+/** Deactivate stale rows then upsert endpoints from the active recipe. */
+export async function syncRetailerEndpointsFromRecipe(
+  retailerId: string,
+  recipe: CrawlRecipe,
+  validationReport?: ValidationReport | null,
+): Promise<void> {
+  await db
+    .update(schema.retailerEndpoints)
+    .set({ active: false })
+    .where(eq(schema.retailerEndpoints.retailerId, retailerId));
+
+  await saveRetailerEndpointsFromDiscovery(retailerId, recipe, { validationReport });
+}
+
 /** Populate retailer_endpoints from validated API recipe and optional network captures. */
 export async function saveRetailerEndpointsFromDiscovery(
   retailerId: string,

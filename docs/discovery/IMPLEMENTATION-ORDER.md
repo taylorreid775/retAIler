@@ -188,11 +188,11 @@ Recommended build sequence for coding agents. Each phase has clear dependencies 
 
 ## Priority 5 — Polish
 
-- [ ] Dashboard discovery progress UI
-- [ ] Ops rollback UI for recipe versions
-- [ ] Weekly rediscovery scheduler for unhealthy retailers
-- [ ] Endpoint pattern library
-- [ ] Cost dashboard from `discovery_runs.token_usage`
+- [x] Dashboard discovery progress UI
+- [x] Ops rollback UI for recipe versions
+- [x] Weekly rediscovery scheduler for unhealthy retailers
+- [x] Endpoint pattern library
+- [x] Cost dashboard from `discovery_runs.token_usage`
 
 ---
 

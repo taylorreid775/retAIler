@@ -5,6 +5,7 @@ import { startDiscoverConfigWorker } from './consumers/discover-config.js';
 import { startDiscoverWorker } from './consumers/discover.js';
 import { startCrawlHealthWorker } from './consumers/crawl-health.js';
 import { startDiscoverRepairWorker } from './consumers/discover-repair.js';
+import { startDiscoverRediscoverWorker } from './consumers/discover-rediscover.js';
 import { startFetchWorker } from './consumers/fetch.js';
 import { startExtractWorker } from './consumers/extract.js';
 import { startMatchWorker } from './consumers/match.js';
@@ -26,7 +27,11 @@ async function main() {
   const workers: Worker[] = [];
 
   if (shouldStartWorker(groups, 'discovery')) {
-    workers.push(startDiscoverConfigWorker(), startDiscoverRepairWorker());
+    workers.push(
+      startDiscoverConfigWorker(),
+      startDiscoverRepairWorker(),
+      startDiscoverRediscoverWorker(),
+    );
   }
 
   if (shouldStartWorker(groups, 'crawl')) {

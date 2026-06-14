@@ -5,4 +5,5 @@ export * from './inventory';
 export * from './seo';
 export * from './queries';
 export * from './ops';
+export * from './discovery-cost';
 export * from './run';

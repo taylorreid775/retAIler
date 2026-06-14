@@ -9,6 +9,7 @@ import {
   type ExtractJob,
   type FetchJob,
   type MatchJob,
+  type RediscoverJob,
   type ReportJob,
 } from '@retailer/schema';
 import { redisConnection } from './connection';
@@ -23,6 +24,7 @@ type JobMap = {
   [QueueName.Reports]: ReportJob;
   [QueueName.CrawlHealth]: CrawlHealthJob;
   [QueueName.DiscoverRepair]: DiscoverRepairJob;
+  [QueueName.Rediscover]: RediscoverJob;
 };
 
 const defaultJobOptions = {
@@ -56,6 +58,7 @@ export const queues = {
   reports: () => getQueue(QueueName.Reports),
   crawlHealth: () => getQueue(QueueName.CrawlHealth),
   discoverRepair: () => getQueue(QueueName.DiscoverRepair),
+  rediscover: () => getQueue(QueueName.Rediscover),
 };
 
 export type { JobMap };

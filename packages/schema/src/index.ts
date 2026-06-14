@@ -8,4 +8,5 @@ export * from './tenant';
 export * from './crawl-recipe';
 export * from './fingerprint';
 export * from './health';
+export * from './discovery-run';
 export * from './recipes/sportchek-crawl-recipe';

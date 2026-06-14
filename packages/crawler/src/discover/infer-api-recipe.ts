@@ -45,7 +45,7 @@ function normalizeCaptures(
 export async function inferApiRecipeFromCaptures(
   captures: CapturedJsonResponse[] | CapturedRequest[],
   ctx: { domain: string; homepageUrl: string },
-): Promise<{ api: ApiRecipe; productUrlPattern: string | null } | null> {
+): Promise<{ api: ApiRecipe; productUrlPattern: string | null; usage?: { totalTokens: number } } | null> {
   const ranked = normalizeCaptures(captures)
     .filter((c) => c.productLikeScore >= 0.4)
     .sort((a, b) => b.productLikeScore - a.productLikeScore)
@@ -81,7 +81,7 @@ export async function inferApiRecipeFromCaptures(
     .join('\n');
 
   try {
-    const { object } = await generateObject({
+    const { object, usage } = await generateObject({
       model: extractionModel(),
       schema: InferredApiRecipeSchema,
       system:
@@ -121,6 +121,7 @@ export async function inferApiRecipeFromCaptures(
     return {
       api: apiParsed.data,
       productUrlPattern: object.productUrlPattern ?? null,
+      usage: usage?.totalTokens ? { totalTokens: usage.totalTokens } : undefined,
     };
   } catch (err) {
     log.warn('API recipe inference failed', { err: String(err) });
