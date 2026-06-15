@@ -3,8 +3,10 @@ name: Discovery Benchmark
 # Enqueues 25-retailer discovery jobs to production Redis (Fly discovery worker).
 # Does NOT run Playwright locally — avoids browser lock conflicts.
 #
-# Required repo secrets: DATABASE_URL, REDIS_URL
-# Optional: AI_GATEWAY_API_KEY (for Jina/network inference on worker)
+# Required repo secrets (use production values — NOT .env localhost Redis):
+#   DATABASE_URL  — Neon pooler URL
+#   REDIS_URL     — Upstash rediss:// URL (from .env.production.local)
+# Optional: AI_GATEWAY_API_KEY
 
 on:
   workflow_dispatch:
@@ -36,6 +38,15 @@ jobs:
 
       - name: Install
         run: pnpm install --frozen-lockfile
+
+      - name: Validate production secrets
+        env:
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+        run: |
+          if echo "$REDIS_URL" | grep -qE 'localhost|127\.0\.0\.1|::1'; then
+            echo "REDIS_URL must be production Upstash, not localhost. Update the GitHub secret from .env.production.local"
+            exit 1
+          fi
 
       - name: Enqueue benchmark jobs
         if: inputs.mode == 'enqueue'
