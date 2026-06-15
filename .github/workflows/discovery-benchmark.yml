@@ -1,0 +1,62 @@
+name: Discovery Benchmark
+
+# Enqueues 25-retailer discovery jobs to production Redis (Fly discovery worker).
+# Does NOT run Playwright locally — avoids browser lock conflicts.
+#
+# Required repo secrets: DATABASE_URL, REDIS_URL
+# Optional: AI_GATEWAY_API_KEY (for Jina/network inference on worker)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: true
+        default: 'enqueue'
+        type: choice
+        options:
+          - enqueue
+          - collect
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Enqueue benchmark jobs
+        if: inputs.mode == 'enqueue'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+        run: |
+          pnpm --filter @retailer/worker exec tsx src/scripts/run-discovery-benchmark.ts --enqueue-only
+
+      - name: Collect benchmark results
+        if: inputs.mode == 'collect'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+        run: |
+          pnpm --filter @retailer/worker exec tsx src/scripts/run-discovery-benchmark.ts --collect-only
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovery-benchmark-${{ github.run_id }}
+          path: docs/discovery/benchmarks/benchmark-2026-06-14.*
+          if-no-files-found: ignore
